@@ -15,6 +15,7 @@ export class Input {
   readonly isTouch: boolean;
 
   private keys = new Set<string>();
+  private pressed = new Set<string>();
   private joyId: number | null = null;
   private joyVec = { x: 0, y: 0 };
   private lookPointers = new Map<number, { x: number; y: number }>();
@@ -26,6 +27,7 @@ export class Input {
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this.keys.add(e.code);
+      this.pressed.add(e.code);
       if (e.code === 'Space') { this.jumpQueued = true; e.preventDefault(); }
       if (e.code.startsWith('Arrow')) e.preventDefault();
     });
@@ -79,6 +81,7 @@ export class Input {
 
     this.setupJoystick();
     this.setupJumpButton();
+    this.setupActionButton();
   }
 
   private currentPinch() {
@@ -140,6 +143,31 @@ export class Input {
     // app switched / screen locked: never leave the explorer walking on its own
     document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
     window.addEventListener('blur', release);
+  }
+
+  /** True once per key press (edge-triggered). 'Action' = touch action button. */
+  consumeKey(code: string): boolean {
+    const had = this.pressed.has(code);
+    this.pressed.delete(code);
+    return had;
+  }
+
+  /** Touch action button (TALK / EXAMINE). */
+  setupActionButton() {
+    const btn = document.getElementById('btn-action');
+    if (!btn) return;
+    btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.pressed.add('Action');
+    });
+  }
+
+  /** Drop all held movement (modal UI opened). */
+  clearHeld() {
+    this.keys.clear();
+    this.pressed.clear();
+    this.releaseJoystick();
   }
 
   /** Release the joystick (also used when menus/dialogue take over). */

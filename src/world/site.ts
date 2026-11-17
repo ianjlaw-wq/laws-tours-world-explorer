@@ -10,7 +10,7 @@ import { CollisionWorld } from './colliders';
 import { TerrainGrid, trailInfo, DETAIL } from './terrain';
 import { fbm, rng } from './noise';
 import {
-  AG, EAST_Y, FLANK, GUARDHOUSE, PADS, PLAZA_Y, SUN_GATE, TRAIL, WEST_Y,
+  AG, CHAMBER, EAST_Y, FLANK, GUARDHOUSE, PADS, PLAZA_Y, SUN_GATE, TRAIL, WEST_Y,
 } from './layout';
 import { cloudTexture, grassBladeTexture, leafClusterTexture } from './textures';
 import { boulderMaterial, foliageMaterial, groundMaterial, stoneMaterial, tex, thatchMaterial } from './materials';
@@ -20,13 +20,17 @@ type MatKey = 'stone' | 'fine' | 'grass' | 'thatch' | 'rock' | 'wood';
 /** Collects boxes per material, registers colliders, then merges into few draw calls. */
 interface WallTop { x: number; z: number; w: number; d: number; rot: number; top: number }
 
-class Builder {
+export class Builder {
   private groups = new Map<MatKey, Mesh[]>();
   private n = 0;
   private r = rng(2024);
   /** When true, masonry walls get rubble/irregular capstones (roofless ruins). */
   ruin = false;
   readonly ruinTops: WallTop[] = [];
+  /** Roofless houses: get thatched roofs in the 15th-century era. */
+  readonly ruinHouses: Array<{ x: number; z: number; w: number; d: number; rot: number; top: number; gable: boolean }> = [];
+  /** When false, prisms are returned but not merged into the static site (era roofs). */
+  collect = true;
   constructor(private scene: Scene, private world: CollisionWorld, readonly mats: Record<MatKey, StandardMaterial>) {}
 
   /** Per-block tint variation and darker, weathered bases (vertex colours). */
@@ -140,7 +144,7 @@ class Builder {
     this.paint(m, false);
     m.position.set(x, baseY, z);
     m.rotation.y = rot;
-    this.add(key, m);
+    if (this.collect) this.add(key, m);
     return m;
   }
 
@@ -196,6 +200,7 @@ class Builder {
       [px, pz] = L(hw - t / 2, 0);
       this.prism(key, px, pz, d, gh, t, top, rot + Math.PI / 2);
     }
+    if (!opts.roof) this.ruinHouses.push({ x, z, w, d, rot, top, gable: !!opts.gable });
     if (opts.roof) {
       // thatch overhangs the walls
       this.prism('thatch', x, z, d + 1.3, gh + 0.55, w + 0.9, top - 0.5, rot + Math.PI / 2);
@@ -282,6 +287,10 @@ export interface SiteResult {
   shadowCasters: Mesh[];
   clouds: Mesh[];
   grass: Mesh;
+  rubble: Mesh;
+  builder: Builder;
+  /** 15th-century era layers (hidden until the transformation) */
+  era: { roofs: Mesh; roofMat: StandardMaterial; crops: Mesh; chimneys: Vector3[] };
 }
 
 export function buildSite(scene: Scene, world: CollisionWorld, grid: TerrainGrid): SiteResult {
@@ -314,7 +323,8 @@ export function buildSite(scene: Scene, world: CollisionWorld, grid: TerrainGrid
   const grass = buildGrass(scene, world, grid);
   buildScatterRocks(scene, grid, b.mats.rock);
   const clouds = buildClouds(scene);
-  return { shadowCasters: casters, clouds, grass };
+  const era = buildEraLayers(scene, b, world);
+  return { shadowCasters: casters, clouds, grass, rubble, builder: b, era };
 }
 
 // ----------------------------------------------------------------------------
@@ -366,18 +376,52 @@ function buildAgriculturalTerraces(b: Builder) {
     const x1 = AG.x1 - 1.8 * Math.cos(k * 1.3) - k * 0.3;
     const w = x1 - x0;
     const cx = (x0 + x1) / 2;
-    // stone retaining wall (front face)
-    b.block('stone', cx, zf - 0.45, w, 0.9, bottom, top, 0);
-    // earth fill with grass top
-    b.block('grass', cx, (zf - 0.9 + zb) / 2, w, zf - 0.9 - zb, bottom, top - 0.02, 0, true, 6);
+    const segs: Array<[number, number]> = k === 0 ? [[x0, CHAMBER.x0], [CHAMBER.x1, x1]] : [[x0, x1]];
+    for (const [sx0, sx1] of segs) {
+      const sw = sx1 - sx0;
+      const scx = (sx0 + sx1) / 2;
+      // stone retaining wall (front face)
+      b.block('stone', scx, zf - 0.45, sw, 0.9, bottom, top, 0);
+      // earth fill with grass top
+      b.block('grass', scx, (zf - 0.9 + zb) / 2, sw, zf - 0.9 - zb, bottom, top - 0.02, 0, true, 6);
+    }
+    void w; void cx;
     // staircase climbing this riser from the level below (sits on the lower terrace)
     b.stairs('stone', AG.stairX, zf + 0.02, 1.7, AG.rise * k, top, Math.PI);
   }
+  buildChamberShell(b);
   // Two side staircases further along for variety (west side)
   for (let k = 0; k < AG.count; k += 3) {
     const zf = AG.zStart - AG.depth * k;
     b.stairs('stone', -24 + k * 0.4, zf + 0.02, 1.3, AG.rise * k, AG.rise * (k + 1), Math.PI);
   }
+}
+
+/** Fictional sealed chamber inside the first terrace: fine masonry, niches, an altar. Door is separate. */
+function buildChamberShell(b: Builder) {
+  const { x0, x1, zFront, zBack, door } = CHAMBER;
+  const top = AG.rise;
+  const t = 0.7;
+  const fz = zFront - 0.45;
+  const dl = door.x - door.w / 2;
+  const dr = door.x + door.w / 2;
+  // front wall either side of the doorway, and the lintel
+  b.block('fine', (x0 + dl) / 2, fz, dl - x0, 0.9, -1.2, top, 0);
+  b.block('fine', (dr + x1) / 2, fz, x1 - dr, 0.9, -1.2, top, 0);
+  b.block('fine', door.x, fz, door.w + 0.1, 0.9, door.h, top, 0);
+  // side and back walls
+  // (kept below the lawn that roofs the chamber, so they do not show on the terrace)
+  b.block('fine', x0 + t / 2, (zFront - 0.9 + zBack) / 2, t, zFront - 0.9 - zBack, -1.2, 2.2, 0);
+  b.block('fine', x1 - t / 2, (zFront - 0.9 + zBack) / 2, t, zFront - 0.9 - zBack, -1.2, 2.2, 0);
+  b.block('fine', (x0 + x1) / 2, zBack + t / 2, x1 - x0 - 2 * t, t, -1.2, 2.2, 0);
+  // floor and roof (the roof is the terrace lawn above)
+  b.block('fine', (x0 + x1) / 2, (zFront + zBack) / 2, x1 - x0, zFront - zBack, -0.6, 0.02, 0, true, 1.4);
+  b.block('grass', (x0 + x1) / 2, (zFront - 0.9 + zBack) / 2, x1 - x0, zFront - 0.9 - zBack, 2.2, top - 0.02, 0, true, 6);
+  // dressed-stone ceiling under the lawn (the explorer's head stays well below it)
+  b.block('fine', (x0 + x1) / 2, (zFront - 0.9 + zBack) / 2, x1 - x0 - 2 * t, zFront - 0.9 - zBack - t, 2.0, 2.22, 0, true, 1.4);
+  // trapezoidal wall niches (dark recesses suggested by inset blocks) and an altar
+  for (const nx of [-1.6, 0, 1.6]) b.block('stone', door.x + nx, zBack + t + 0.05, 0.7, 0.1, 0.8, 1.6, 0, false, 1);
+  b.block('fine', door.x, zBack + t + 0.6, 2.2, 1.0, 0, 0.85, 0);
 }
 
 function buildGuardhouse(b: Builder) {
@@ -725,6 +769,73 @@ function buildTrees(scene: Scene, grid: TerrainGrid) {
   }
 }
 
+/** Thatched roofs for every roofless house, maize on the lower terraces, chimney points for smoke. */
+function buildEraLayers(scene: Scene, b: Builder, world: CollisionWorld) {
+  const roofMat = thatchMaterial(scene);
+  roofMat.name = 'eraThatch';
+  b.collect = false;
+  const parts: Mesh[] = [];
+  const chimneys: Vector3[] = [];
+  b.ruinHouses.forEach((h, i) => {
+    parts.push(b.prism('thatch', h.x, h.z, h.d + 1.3, h.d * 0.42 + 0.55, h.w + 0.9, h.top - 0.5, h.rot + Math.PI / 2));
+    if (i % 3 === 0) chimneys.push(new Vector3(h.x, h.top + h.d * 0.42 + 0.2, h.z));
+  });
+  b.collect = true;
+  const roofs = parts.length ? Mesh.MergeMeshes(parts, true)! : new Mesh('eraRoofs', scene);
+  roofs.name = 'eraRoofs';
+  roofs.material = roofMat;
+  roofs.receiveShadows = true;
+  roofs.isPickable = false;
+  roofs.setEnabled(false);
+
+  // Maize: two crossed tall cards per plant, in rows on terraces 1-4 (artistic impression).
+  const cards: Mesh[] = [];
+  for (let i = 0; i < 2; i++) {
+    const p = MeshBuilder.CreatePlane('m' + i, { width: 0.55, height: 1.5 }, scene);
+    p.position.y = 0.72;
+    p.rotation.y = (i * Math.PI) / 2;
+    p.bakeCurrentTransformIntoVertices();
+    cards.push(p);
+  }
+  const plant = Mesh.MergeMeshes(cards, true)!;
+  plant.name = 'eraCrops';
+  const n = plant.getTotalVertices();
+  const up = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) up[i * 3 + 1] = 1;
+  plant.setVerticesData('normal', up);
+  plant.material = foliageMaterial(scene, 'cropMat', grassBladeTexture(scene), 0.06);
+  plant.isPickable = false;
+  const r = rng(77);
+  const matrices: number[] = [];
+  const colours: number[] = [];
+  const tmp = Matrix.Identity();
+  for (let k = 1; k <= 4; k++) {
+    const zf = AG.zStart - AG.depth * k;
+    const zb = zf - AG.depth;
+    const x0 = AG.x0 + 2.2 * Math.sin(k * 1.7) + k * 0.4 + 1;
+    const x1 = AG.x1 - 1.8 * Math.cos(k * 1.3) - k * 0.3 - 1;
+    for (let z = zb + 1.0; z < zf - 1.4; z += 1.3) {
+      for (let x = x0; x < x1; x += 1.1) {
+        if (Math.abs(x - AG.stairX) < 1.8) continue;
+        if (k % 3 === 0 && Math.abs(x - (-24 + k * 0.4)) < 1.5) continue;
+        const px = x + (r() - 0.5) * 0.3;
+        const pz = z + (r() - 0.5) * 0.2;
+        const g = world.groundAt(px, pz, AG.rise * (k + 1) + 0.3, 0).y;
+        const s = 0.8 + r() * 0.35;
+        Matrix.ComposeToRef(new Vector3(s, s * (0.85 + r() * 0.3), s), Quaternion.FromEulerAngles(0, r() * 6.28, 0), new Vector3(px, g - 0.02, pz), tmp);
+        matrices.push(...tmp.toArray());
+        const kk = 0.85 + r() * 0.2;
+        colours.push(kk * 0.6, kk * 0.68, kk * 0.36, 1);
+      }
+    }
+  }
+  plant.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
+  plant.thinInstanceSetBuffer('color', new Float32Array(colours), 4, true);
+  plant.freezeWorldMatrix();
+  plant.setEnabled(false);
+  return { roofs, roofMat, crops: plant, chimneys };
+}
+
 function buildGrass(scene: Scene, world: CollisionWorld, grid: TerrainGrid): Mesh {
   // Andean bunch grass (ichu) tufts: three crossed alpha cards, lit like the ground.
   const quads: Mesh[] = [];
@@ -767,6 +878,7 @@ function buildGrass(scene: Scene, world: CollisionWorld, grid: TerrainGrid): Mes
     }
     const tr = trailInfo(x, z);
     if (tr.core > 0.3) continue;
+    if (x > CHAMBER.x0 - 0.5 && x < CHAMBER.x1 + 0.5 && z > CHAMBER.zBack - 0.5 && z < CHAMBER.zFront + 0.5) continue;
     const terr = grid.heightAt(x, z);
     const g = world.groundAt(x, z, terr + 3, 0).y;
     if (world.solidAt(x, g + 0.3, z, 0.12)) continue; // inside a wall

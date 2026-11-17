@@ -70,7 +70,8 @@ export class Explorer {
   /** Called at each footfall with the current speed. */
   onFootstep: ((speed: number) => void) | null = null;
 
-  constructor(scene: Scene) {
+  constructor(scene: Scene, opts: { villager?: boolean; name?: string } = {}) {
+    const v = !!opts.villager;
     const fab = (name: string, c: Color3, seed: number) => {
       const m = new StandardMaterial(name, scene);
       m.diffuseColor = c;
@@ -85,19 +86,20 @@ export class Explorer {
       m.specularPower = power;
       return m;
     };
-    const skin = plain('skin', new Color3(0.8, 0.6, 0.47), 0.12, 20);
-    const shirt = fab('shirt', new Color3(0.86, 0.79, 0.6), 1);
-    const trousers = fab('trousers', new Color3(0.42, 0.38, 0.28), 2);
-    const leather = plain('leather', new Color3(0.33, 0.21, 0.12), 0.18, 40);
-    const boots = plain('boots', new Color3(0.27, 0.18, 0.11), 0.12, 30);
+    const skin = plain('skin', v ? new Color3(0.6, 0.41, 0.29) : new Color3(0.8, 0.6, 0.47), 0.12, 20);
+    // villager: anaku (wrapped dress) in madder red, woven belt, lliclla shawl
+    const shirt = fab('shirt', v ? new Color3(0.56, 0.17, 0.13) : new Color3(0.86, 0.79, 0.6), 1);
+    const trousers = fab('trousers', v ? new Color3(0.5, 0.15, 0.12) : new Color3(0.42, 0.38, 0.28), 2);
+    const leather = v ? fab('chumpi', new Color3(0.85, 0.62, 0.2), 6) : plain('leather', new Color3(0.33, 0.21, 0.12), 0.18, 40);
+    const boots = plain('boots', v ? new Color3(0.42, 0.3, 0.18) : new Color3(0.27, 0.18, 0.11), 0.12, 30);
     const sole = plain('sole', new Color3(0.12, 0.1, 0.08));
     const hat = fab('hat', new Color3(0.58, 0.44, 0.27), 3);
     const pack = fab('pack', new Color3(0.55, 0.24, 0.15), 4);
     const roll = fab('roll', new Color3(0.22, 0.35, 0.3), 5);
-    const hair = plain('hair', new Color3(0.18, 0.11, 0.07), 0.1, 20);
+    const hair = plain('hair', v ? new Color3(0.05, 0.04, 0.035) : new Color3(0.18, 0.11, 0.07), 0.1, 20);
     const metal = plain('metal', new Color3(0.7, 0.68, 0.6), 0.6, 64);
 
-    this.root = new TransformNode('explorer', scene);
+    this.root = new TransformNode(opts.name ?? 'explorer', scene);
     const add = (mesh: Mesh, parent: TransformNode, mat: StandardMaterial, x = 0, y = 0, z = 0) => {
       mesh.parent = parent;
       mesh.material = mat;
@@ -131,9 +133,9 @@ export class Explorer {
     const collar = add(MeshBuilder.CreateTorus('collar', { diameter: 0.17, thickness: 0.045, tessellation: 16 }, scene), this.chest, shirt, 0, 0.38, 0.0);
     collar.scaling.set(1, 1, 0.85);
     add(MeshBuilder.CreateCylinder('belt', { height: 0.06, diameter: 0.33, tessellation: 16 }, scene), this.torso, leather, 0, 0.0, 0).scaling.set(1.03, 1, 0.8);
-    add(MeshBuilder.CreateBox('buckle', { width: 0.06, height: 0.05, depth: 0.02 }, scene), this.torso, metal, 0, 0.0, 0.135);
+    if (!v) add(MeshBuilder.CreateBox('buckle', { width: 0.06, height: 0.05, depth: 0.02 }, scene), this.torso, metal, 0, 0.0, 0.135);
     // shirt pockets
-    for (const sx of [-1, 1]) {
+    for (const sx of v ? [] : [-1, 1]) {
       add(MeshBuilder.CreateBox('pocketS', { width: 0.09, height: 0.1, depth: 0.02 }, scene), this.chest, shirt, sx * 0.09, 0.22, 0.135);
     }
 
@@ -151,28 +153,44 @@ export class Explorer {
     }
     const hairM = add(MeshBuilder.CreateSphere('hair', { diameter: 0.245, segments: 14, slice: 0.55 }, scene), this.head, hair, 0, 0.13, -0.012);
     hairM.scaling.set(0.94, 1, 1.02);
-    add(MeshBuilder.CreateCylinder('brim', { height: 0.018, diameter: 0.44, tessellation: 28 }, scene), this.head, hat, 0, 0.215, 0);
-    const crown = add(MeshBuilder.CreateCylinder('crown', { height: 0.13, diameterTop: 0.2, diameterBottom: 0.25, tessellation: 24 }, scene), this.head, hat, 0, 0.285, 0);
-    crown.scaling.set(1, 1, 1.12);
-    add(MeshBuilder.CreateCylinder('crease', { height: 0.02, diameterTop: 0.12, diameterBottom: 0.2, tessellation: 20 }, scene), this.head, hat, 0, 0.35, 0).scaling.set(1, 1, 1.12);
-    add(MeshBuilder.CreateCylinder('band', { height: 0.03, diameter: 0.252, tessellation: 24 }, scene), this.head, leather, 0, 0.235, 0).scaling.set(1, 1, 1.12);
+    if (!v) {
+      add(MeshBuilder.CreateCylinder('brim', { height: 0.018, diameter: 0.44, tessellation: 28 }, scene), this.head, hat, 0, 0.215, 0);
+      const crown = add(MeshBuilder.CreateCylinder('crown', { height: 0.13, diameterTop: 0.2, diameterBottom: 0.25, tessellation: 24 }, scene), this.head, hat, 0, 0.285, 0);
+      crown.scaling.set(1, 1, 1.12);
+      add(MeshBuilder.CreateCylinder('crease', { height: 0.02, diameterTop: 0.12, diameterBottom: 0.2, tessellation: 20 }, scene), this.head, hat, 0, 0.35, 0).scaling.set(1, 1, 1.12);
+      add(MeshBuilder.CreateCylinder('band', { height: 0.03, diameter: 0.252, tessellation: 24 }, scene), this.head, leather, 0, 0.235, 0).scaling.set(1, 1, 1.12);
 
-    // Rucksack (on the back = local -Z): rounded body, flap, side pockets, bedroll, straps
-    const bag = add(cap('pack', 0.52, 0.16), this.chest, pack, 0, 0.12, -0.24);
-    bag.scaling.set(1.2, 1, 0.68);
-    const flap = add(cap('flap', 0.26, 0.12), this.chest, leather, 0, 0.32, -0.25);
-    flap.rotation.z = Math.PI / 2;
-    flap.scaling.set(0.55, 1.35, 0.9);
-    for (const sx of [-1, 1]) {
-      const sp = add(cap('sidePocket', 0.24, 0.07), this.chest, pack, sx * 0.205, 0.04, -0.24);
-      sp.scaling.set(0.8, 1, 1);
-      add(MeshBuilder.CreateBox('strap', { width: 0.05, height: 0.42, depth: 0.025 }, scene), this.chest, leather, sx * 0.1, 0.17, 0.14);
-      add(MeshBuilder.CreateBox('strapTop', { width: 0.05, height: 0.025, depth: 0.32 }, scene), this.chest, leather, sx * 0.1, 0.38, -0.02);
-      add(MeshBuilder.CreateBox('rollStrap', { width: 0.03, height: 0.16, depth: 0.16 }, scene), this.chest, leather, sx * 0.12, 0.46, -0.22);
+      // Rucksack (on the back = local -Z): rounded body, flap, side pockets, bedroll, straps
+      const bag = add(cap('pack', 0.52, 0.16), this.chest, pack, 0, 0.12, -0.24);
+      bag.scaling.set(1.2, 1, 0.68);
+      const flap = add(cap('flap', 0.26, 0.12), this.chest, leather, 0, 0.32, -0.25);
+      flap.rotation.z = Math.PI / 2;
+      flap.scaling.set(0.55, 1.35, 0.9);
+      for (const sx of [-1, 1]) {
+        const sp = add(cap('sidePocket', 0.24, 0.07), this.chest, pack, sx * 0.205, 0.04, -0.24);
+        sp.scaling.set(0.8, 1, 1);
+        add(MeshBuilder.CreateBox('strap', { width: 0.05, height: 0.42, depth: 0.025 }, scene), this.chest, leather, sx * 0.1, 0.17, 0.14);
+        add(MeshBuilder.CreateBox('strapTop', { width: 0.05, height: 0.025, depth: 0.32 }, scene), this.chest, leather, sx * 0.1, 0.38, -0.02);
+        add(MeshBuilder.CreateBox('rollStrap', { width: 0.03, height: 0.16, depth: 0.16 }, scene), this.chest, leather, sx * 0.12, 0.46, -0.22);
+      }
+      const bed = add(MeshBuilder.CreateCylinder('bedroll', { height: 0.5, diameter: 0.14, tessellation: 16 }, scene), this.chest, roll, 0, 0.46, -0.22);
+      bed.rotation.z = Math.PI / 2;
+      add(MeshBuilder.CreateCylinder('bottle', { height: 0.2, diameter: 0.075, tessellation: 12 }, scene), this.torso, metal, 0.2, -0.05, -0.05);
+    } else {
+      // ñañaka head cloth, long braid, lliclla shawl pinned with a tupu, long anaku skirt
+      const shawl = fab('lliclla', new Color3(0.82, 0.6, 0.22), 7);
+      const cloth = fab('nanaka', new Color3(0.3, 0.2, 0.42), 8);
+      const hc = add(MeshBuilder.CreateBox('headcloth', { width: 0.27, height: 0.03, depth: 0.29 }, scene), this.head, cloth, 0, 0.245, -0.01);
+      hc.rotation.x = -0.12;
+      add(MeshBuilder.CreateBox('headclothBack', { width: 0.25, height: 0.18, depth: 0.025 }, scene), this.head, cloth, 0, 0.17, -0.145);
+      const braid = add(cap('braid', 0.42, 0.03), this.head, hair, 0, -0.1, -0.12);
+      braid.rotation.x = 0.15;
+      const sh = add(cap('shawl', 0.5, 0.2), this.chest, shawl, 0, 0.3, -0.03);
+      sh.rotation.z = Math.PI / 2;
+      sh.scaling.set(0.5, 1.02, 0.9);
+      add(MeshBuilder.CreateCylinder('tupu', { height: 0.12, diameter: 0.018, tessellation: 6 }, scene), this.chest, metal, 0, 0.26, 0.16);
+      add(MeshBuilder.CreateCylinder('skirt', { height: 0.78, diameterTop: 0.36, diameterBottom: 0.52, tessellation: 18 }, scene), this.hips, trousers, 0, -0.42, 0).scaling.set(1, 1, 0.82);
     }
-    const bed = add(MeshBuilder.CreateCylinder('bedroll', { height: 0.5, diameter: 0.14, tessellation: 16 }, scene), this.chest, roll, 0, 0.46, -0.22);
-    bed.rotation.z = Math.PI / 2;
-    add(MeshBuilder.CreateCylinder('bottle', { height: 0.2, diameter: 0.075, tessellation: 12 }, scene), this.torso, metal, 0.2, -0.05, -0.05);
 
     // Limbs: pivot at shoulder/hip, joint at elbow/knee, ankle for feet
     const arm = (name: string, sx: number) => {

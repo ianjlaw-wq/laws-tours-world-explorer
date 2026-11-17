@@ -37,6 +37,15 @@ export class FollowCamera {
     this.cam.alpha = Math.atan2(-Math.cos(heading), -Math.sin(heading));
   }
 
+  /** Set the preferred camera distance (clamped). */
+  setZoom(r: number) {
+    this.desiredRadius = Math.min(MAX_R, Math.max(MIN_R, r));
+  }
+
+  get zoom() {
+    return this.desiredRadius;
+  }
+
   /** Jump straight to the target next frame (after teleports/respawns). */
   snap() {
     this.initialised = false;

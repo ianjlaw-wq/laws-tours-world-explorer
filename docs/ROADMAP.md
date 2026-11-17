@@ -1,11 +1,15 @@
 # Roadmap
 
-## Milestone B: exploration prototype (current)
+## Milestone B: exploration prototype (accepted)
 Babylon.js scene, explorer with backpack, walk/run/jump, mobile joystick + swipe camera + jump button,
 keyboard/mouse, follow camera, Sun Gate approach via the Inca Trail, terraces, plaza, temples,
 Intihuatana, sky/fog/ambience, collision, loading screen, GitHub Pages deployment.
 
-## Milestone C: first small adventure (awaiting owner acceptance of B)
+## Milestone C: first small adventure (implemented; awaiting Android testing)
+Implemented in `src/game/`. Flow: Sun Gate → transformation at the trail overlook (≈4 s, skippable) →
+Killa greets you at the guardhouse → gold-coin trail down the terrace stairs → the Turning Stones
+(condor / puma / serpent) → the hidden chamber and golden llama → free exploration.
+Original plan:
 1. Short historical transformation sequence (ruins → inhabited 15th-century settlement).
 2. One welcoming Inca villager with scripted dialogue.
 3. A short trail of collectible gold coins.

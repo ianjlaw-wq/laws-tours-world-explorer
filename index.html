@@ -21,7 +21,10 @@
       <div class="destination">Machu Picchu · Peru</div>
       <div class="bar"><div id="loading-fill"></div></div>
       <div id="loading-text">Preparing the Inca Trail…</div>
-      <button id="start-btn" hidden>Begin the journey</button>
+      <div id="start-row">
+        <button id="start-btn" hidden>Begin the journey</button>
+        <button id="newgame-btn" hidden>New journey</button>
+      </div>
       <div class="disclaimer">
         Prototype. The landscape and ruins are an artistic approximation inspired by
         Machu Picchu, not a survey-accurate reconstruction.
@@ -32,16 +35,59 @@
     <div id="hud" hidden>
       <div id="location-banner"></div>
       <div id="top-right">
+        <div id="gold" aria-label="Gold collected"><span class="coin-icon"></span><span id="gold-count">0</span></div>
+        <button id="btn-journal" class="hud-btn" aria-label="Explorer's Journal">📖</button>
         <button id="btn-sound" class="hud-btn" aria-label="Toggle sound">🔊</button>
         <button id="btn-help" class="hud-btn" aria-label="Controls help">?</button>
       </div>
       <div id="fps"></div>
+      <div id="objective"></div>
+      <div id="toasts"></div>
+      <div id="prompt" hidden></div>
     </div>
 
     <!-- Touch controls (shown on touch devices) -->
     <div id="touch-ui" hidden>
       <div id="joystick-zone"><div id="joystick-base"><div id="joystick-knob"></div></div></div>
       <button id="btn-jump" aria-label="Jump">JUMP</button>
+      <button id="btn-action" aria-label="Interact" hidden>TALK</button>
+    </div>
+
+    <!-- Transformation cinematic -->
+    <div id="era-flash"></div>
+    <div id="era-title" hidden>
+      <div class="era-year">c. 1450</div>
+      <div class="era-name">Machu Picchu comes to life</div>
+      <div class="era-note">An artistic impression of the inhabited Inca estate</div>
+    </div>
+    <button id="era-skip" hidden>Skip ▸▸</button>
+
+    <!-- Dialogue -->
+    <div id="dialogue" class="panel" hidden>
+      <div id="dlg-speaker"></div>
+      <div id="dlg-text"></div>
+      <div id="dlg-note" hidden></div>
+      <div id="dlg-choices"></div>
+    </div>
+
+    <!-- Stone mechanism puzzle -->
+    <div id="puzzle" class="panel" hidden>
+      <div class="panel-title">The Turning Stones</div>
+      <div id="pz-hint"></div>
+      <div id="pz-wheels"></div>
+      <div id="pz-status"></div>
+      <div class="panel-foot"><span class="tag story">Story</span> This mechanism is invented for the game. <button id="pz-close" class="link-btn">Step back</button></div>
+    </div>
+
+    <!-- Explorer's Journal -->
+    <div id="journal" hidden>
+      <div class="journal-book">
+        <div class="journal-head">
+          <span class="journal-title">Explorer's Journal</span>
+          <button id="journal-close" class="hud-btn" aria-label="Close journal">✕</button>
+        </div>
+        <div id="journal-body" class="scrollable"></div>
+      </div>
     </div>
 
     <div id="help" hidden>
@@ -51,13 +97,15 @@
           <h3>Touchscreen</h3>
           <p>Left thumb: joystick to walk. Push it further to run.</p>
           <p>Right side: swipe to look around. Pinch to zoom.</p>
-          <p>JUMP button to jump.</p>
+          <p>JUMP button to jump. TALK / EXAMINE button to interact.</p>
+          <p>📖 opens the Explorer's Journal.</p>
         </div>
         <div>
           <h3>Keyboard &amp; mouse</h3>
           <p>W A S D / arrow keys to walk. Hold Shift to run.</p>
           <p>Space to jump.</p>
           <p>Drag the mouse to look around. Scroll wheel to zoom.</p>
+          <p>E to talk / examine. J for the Journal. Esc closes panels.</p>
         </div>
       </div>
       <button id="help-close">Continue</button>

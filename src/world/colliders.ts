@@ -19,7 +19,7 @@ export class CollisionWorld {
 
   constructor(readonly terrain: TerrainGrid) {}
 
-  addBox(cx: number, cz: number, w: number, d: number, y0: number, y1: number, yaw: number) {
+  addBox(cx: number, cz: number, w: number, d: number, y0: number, y1: number, yaw: number): Box {
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
     const hx = w / 2;
@@ -36,6 +36,17 @@ export class CollisionWorld {
         if (!list) this.cells.set(k, (list = []));
         list.push(b);
       }
+    }
+    return b;
+  }
+
+  /** Remove a box (e.g. an opened door). */
+  removeBox(b: Box) {
+    const i = this.boxes.indexOf(b);
+    if (i >= 0) this.boxes.splice(i, 1);
+    for (const list of this.cells.values()) {
+      const j = list.indexOf(b);
+      if (j >= 0) list.splice(j, 1);
     }
   }
 

@@ -49,6 +49,15 @@ export const AG_Z_END = AG.zStart - AG.depth * AG.count; // -106
 
 export const GUARDHOUSE = { x: -12, z: -115, y: AG_TOP_Y };
 
+// ---- Milestone C adventure (fictional puzzle interior, clearly labelled in game) ----
+/** Sealed chamber built into the first agricultural terrace (fictional). */
+export const CHAMBER = { x0: 10.5, x1: 17.5, zFront: AG.zStart, zBack: AG.zStart - 6.2, door: { x: 14, w: 1.3, h: 1.95 } };
+/** Stone mechanism on the plaza in front of the chamber door. */
+export const MECHANISM = { x: 14, z: -38.6 };
+/** Where the transformation is triggered: the overlook on the trail below the Sun Gate. */
+export const OVERLOOK = { x: 102, z: -194 };
+export const VILLAGER_HOME = { x: 5, z: -116, y: AG_TOP_Y };
+
 export interface Pad {
   x0: number; x1: number; z0: number; z1: number;
   /** target height inside the rectangle */
@@ -78,6 +87,8 @@ export const PADS: Pad[] = [
   },
   // Guardhouse platform at the top of the terraces
   { x0: -24, x1: 8, z0: -124, z1: AG_Z_END, h: flat(AG_TOP_Y), blend: 6 },
+  // Hidden chamber floor (keeps terrain out of the room)
+  { x0: 9, x1: 19, z0: -51.5, z1: -43.5, h: flat(-0.3), blend: 1 },
   // Sun Gate saddle
   { x0: 142, x1: 172, z0: -260, z1: -232, h: (x, z) => 74 + Math.max(0, ((x - 150) - (z + 239)) * 0.06), blend: 6 },
 ];
@@ -94,6 +105,7 @@ export const ZONES: Zone[] = [
   { name: 'Sacred Rock', x: 0, z: 78, r: 12 },
   { name: 'Main Plaza', x: 0, z: 12, r: 26 },
   { name: 'Eastern Residential Sector', x: 36, z: 25, r: 26 },
+  { name: 'The Hidden Chamber', x: 14, z: -47.5, r: 3.2 },
   { name: 'Agricultural Terraces', x: -2, z: -75, r: 40 },
   { name: 'The Inca Trail', x: 80, z: -175, r: 120 },
 ];

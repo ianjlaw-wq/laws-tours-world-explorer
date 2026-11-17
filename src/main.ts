@@ -12,6 +12,7 @@ import { PlayerController } from './player/controller';
 import { FollowCamera } from './camera';
 import { Input } from './input';
 import { Ambience } from './audio';
+import { Adventure } from './game/adventure';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -73,11 +74,23 @@ async function boot() {
   if (env.shadows) {
     for (const m of explorer.meshes) env.shadows.addShadowCaster(m, false);
     for (const m of site.shadowCasters) env.shadows.addShadowCaster(m, false);
+    env.shadows.addShadowCaster(site.era.roofs, false);
   }
 
   const input = new Input(canvas);
   const audio = new Ambience();
   explorer.onFootstep = (s) => audio.footstep(s);
+  if (input.isTouch) document.body.classList.add('touch');
+
+  // Milestone C adventure: restores the local save (position, coins, puzzle, journal, era).
+  const adventure = new Adventure({ scene, world, site, env, player, camera, input, audio, explorerRoot: explorer.root });
+  const spawn = adventure.spawn();
+  if (spawn) {
+    player.pos.set(spawn.x, spawn.y, spawn.z);
+    player.safe.copyFrom(player.pos);
+    player.heading = spawn.heading;
+    camera.setBehind(spawn.heading);
+  }
 
   setProgress(0.9, 'Compiling shaders…');
   await nextFrame();
@@ -97,6 +110,18 @@ async function boot() {
   // ---------------- UI wiring ----------------
   const startBtn = $<HTMLButtonElement>('start-btn');
   startBtn.hidden = false;
+  if (adventure.resumed) {
+    startBtn.textContent = 'Continue the journey';
+    const ng = $<HTMLButtonElement>('newgame-btn');
+    ng.hidden = false;
+    ng.addEventListener('click', () => {
+      if (confirm('Start a new journey? Your saved progress will be erased.')) {
+        adventure.resetting = true;
+        adventure.newGame();
+        location.reload();
+      }
+    });
+  }
   const banner = $('location-banner');
   let bannerTimer = 0;
   let currentZone = '';
@@ -138,6 +163,7 @@ async function boot() {
   // ---------------- Game loop ----------------
   let time = 0;
   let smoothDt = 1 / 60;
+  let explorerFade = 1;
   let zoneCheck = 0;
   const fpsEl = $('fps');
   const showFps = params.has('fps');
@@ -156,8 +182,11 @@ async function boot() {
     input.update();
     const look = input.consumeLook();
     const jump = input.consumeJump();
-    if (playing && help.hidden) {
+    adventure.update(dt, time, playing, look);
+    if (playing && help.hidden && !adventure.blocking) {
       player.update(dt, input.moveX, input.moveY, input.run, jump, camera.yaw);
+    } else if (playing) {
+      player.update(dt, 0, 0, false, false, camera.yaw); // keep gravity/landing during cutscenes and panels
     }
     explorer.root.position.copyFrom(player.pos);
     explorer.root.rotation.y = player.heading;
@@ -165,6 +194,12 @@ async function boot() {
 
     const manualRecently = performance.now() - input.lastLookTime < 1500;
     camera.update(dt, player.pos, look, !manualRecently, player.heading, player.horizontalSpeed > 0.5);
+    // fade the explorer when walls push the camera very close (e.g. inside the hidden chamber)
+    const fade = Math.round(Math.max(0.25, Math.min(1, (camera.cam.radius - 1.3) / 1.5)) * 20) / 20;
+    if (fade !== explorerFade) {
+      explorerFade = fade;
+      for (const m of explorer.meshes) m.visibility = fade;
+    }
     env.follow(player.pos);
     animateClouds(site.clouds, time);
     audio.update(dt);
@@ -175,7 +210,7 @@ async function boot() {
       zoneCheck = 0.4;
       const z = ZONES.find((zn) => Math.hypot(player.pos.x - zn.x, player.pos.z - zn.z) < zn.r);
       const name = z?.name ?? '';
-      if (name && name !== currentZone) showBanner(name);
+      if (name && name !== currentZone) { showBanner(name); adventure.discover(name); }
       currentZone = name;
     }
     if (bannerTimer > 0) {
@@ -217,6 +252,10 @@ async function boot() {
     player,
     camera,
     input,
+    world,
+    adventure,
+    /** Complete the transformation immediately (tests). */
+    skipIntro: () => { adventure.startTransformation(); adventure.skipTransformation(); },
     teleport: (x: number, z: number, heading?: number) => {
       player.pos.set(x, world.groundAt(x, z, 1000, 2000).y, z);
       player.vel.setAll(0);

@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "smoke": "node scripts/smoke-test.mjs",
-    "touchtest": "node scripts/touch-test.mjs"
+    "touchtest": "node scripts/touch-test.mjs",
+    "advtest": "node scripts/adventure-test.mjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

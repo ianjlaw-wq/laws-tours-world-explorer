@@ -20,7 +20,8 @@ export class PlayerController {
   heading = 0;
   grounded = true;
   private airTime = 0;
-  private safe = new Vector3();
+  /** Last confirmed safe standing spot (used for respawn and saves). */
+  readonly safe = new Vector3();
   private safeTimer = 0;
 
   constructor(private world: CollisionWorld, start: { x: number; y: number; z: number }, heading: number) {
@@ -120,6 +121,8 @@ export class PlayerController {
       this.airTime += dt;
       this.vel.y -= GRAVITY * dt;
       this.pos.y += this.vel.y * dt;
+      // bump the head on ceilings (e.g. inside the hidden chamber)
+      if (this.vel.y > 0 && this.world.solidAt(this.pos.x, this.pos.y + HEIGHT, this.pos.z, 0)) this.vel.y = 0;
       if (this.pos.y <= ground && this.vel.y <= 0) {
         this.pos.y = ground;
         this.vel.y = 0;
