@@ -110,6 +110,30 @@ await run('desktop', { viewport: { width: 1280, height: 720 } }, async (page) =>
   await wait(page, 400);
   results.stairClimb = await state(page);
   await page.screenshot({ path: `${out}/desktop-5-stairs.png` });
+  // Deterministic controller checks (fixed 60 Hz steps, independent of render speed)
+  results.sim = await page.evaluate(() => {
+    const g = window.__ltwe;
+    const r = {};
+    g.teleport(160, -249, Math.atan2(128 - 160, -216 + 249));
+    const s0 = { x: g.player.pos.x, z: g.player.pos.z };
+    const walk = g.simulate(4, 0, 1, false);
+    r.walk4s = Math.hypot(walk.x - s0.x, walk.z - s0.z).toFixed(1);
+    const s1 = { x: g.player.pos.x, z: g.player.pos.z };
+    const run = g.simulate(4, 0, 1, true);
+    r.run4s = Math.hypot(run.x - s1.x, run.z - s1.z).toFixed(1);
+    const j = g.simulate(1.5, 0, 0, false, 1);
+    r.jumpHeight = (j.maxY - run.y).toFixed(2);
+    // terrace staircase: from the plaza up three terraces (heading south)
+    g.teleport(-2, -38, Math.PI);
+    const st = g.simulate(12, 0, 1, true);
+    r.stairsY = st.y.toFixed(2);
+    r.stairsZ = st.z.toFixed(1);
+    // wall collision: walk west into the plaza's west retaining wall away from stairs
+    g.teleport(-15, 20, -Math.PI / 2);
+    const w = g.simulate(5, 0, 1, true);
+    r.wallStopX = w.x.toFixed(2);
+    return r;
+  });
   results.fps = await page.evaluate(() => window.__ltwe.fps());
 });
 

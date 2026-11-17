@@ -5,8 +5,8 @@ import { TerrainGrid, buildTerrain } from './world/terrain';
 import { CollisionWorld } from './world/colliders';
 import { buildSite } from './world/site';
 import { buildEnvironment, animateClouds } from './world/environment';
-import { groundDetailTexture } from './world/textures';
-import { PLAYER_START, ZONES } from './world/layout';
+import { setMaterialTime } from './world/materials';
+import { PLAYER_START, TRAIL, ZONES } from './world/layout';
 import { Explorer } from './player/explorer';
 import { PlayerController } from './player/controller';
 import { FollowCamera } from './camera';
@@ -29,14 +29,15 @@ async function boot() {
 
   setProgress(0.05, 'Starting the 3D engine…');
   await nextFrame();
-  const engine = new Engine(canvas, !isTouch, {
+  // MSAA is cheap on tile-based mobile GPUs and removes the jagged edges on stonework.
+  const engine = new Engine(canvas, true, {
     preserveDrawingBuffer: false,
     stencil: false,
     powerPreference: 'high-performance',
     disableWebGL2Support: false,
   }, false);
   const dpr = window.devicePixelRatio || 1;
-  let pixelRatio = Math.min(dpr, isTouch ? 1.5 : 2);
+  let pixelRatio = Math.min(dpr, isTouch ? 1.35 : 2);
   engine.setHardwareScalingLevel(1 / pixelRatio);
 
   const scene = new Scene(engine);
@@ -45,22 +46,24 @@ async function boot() {
 
   setProgress(0.12, 'Shaping the Andes…');
   await nextFrame();
-  const env = buildEnvironment(scene, quality);
+  const env = buildEnvironment(scene, quality, isTouch);
   const grid = new TerrainGrid();
 
   setProgress(0.35, 'Carving the Urubamba gorge…');
   await nextFrame();
-  buildTerrain(scene, grid, groundDetailTexture(scene));
+  buildTerrain(scene, grid);
   const world = new CollisionWorld(grid);
 
   setProgress(0.55, 'Laying Inca stonework…');
   await nextFrame();
   const site = buildSite(scene, world, grid);
+  if (quality === 'low') site.grass.isVisible = false;
 
   setProgress(0.75, 'Packing the explorer’s backpack…');
   await nextFrame();
   const explorer = new Explorer(scene);
-  const startHeading = Math.atan2(0 - PLAYER_START.x, 0 - PLAYER_START.z);
+  // face through the Sun Gate towards the city
+  const startHeading = Math.atan2(TRAIL[2].x - PLAYER_START.x, TRAIL[2].z - PLAYER_START.z);
   const player = new PlayerController(world, PLAYER_START, startHeading);
   const camera = new FollowCamera(scene, world);
   camera.setBehind(startHeading);
@@ -144,6 +147,7 @@ async function boot() {
   engine.runRenderLoop(() => {
     const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
     time += dt;
+    setMaterialTime(time);
 
     input.update();
     const look = input.consumeLook();
@@ -187,7 +191,9 @@ async function boot() {
         downgraded++;
         if (pixelRatio > 1) {
           pixelRatio = Math.max(1, pixelRatio - 0.25);
-        } else if (env.shadows && downgraded >= 2) {
+        } else if (site.grass.isVisible) {
+          site.grass.isVisible = false; // bunch-grass cards are the biggest fill-rate cost
+        } else if (env.shadows && env.sun.shadowEnabled) {
           env.shadows.getShadowMap()!.renderList!.length = 0;
           env.sun.shadowEnabled = false;
         } else {
@@ -214,6 +220,16 @@ async function boot() {
       camera.snap();
     },
     fps: () => engine.getFps(),
+    /** Deterministic fixed-step simulation of the controller (for automated tests). */
+    simulate: (seconds: number, moveX: number, moveY: number, run = false, jumpAt = -1) => {
+      let maxY = -Infinity;
+      const steps = Math.round(seconds * 60);
+      for (let i = 0; i < steps; i++) {
+        player.update(1 / 60, moveX, moveY, run, i === jumpAt, camera.yaw);
+        maxY = Math.max(maxY, player.pos.y);
+      }
+      return { x: player.pos.x, y: player.pos.y, z: player.pos.z, maxY, grounded: player.grounded };
+    },
     ready: true,
   };
 }

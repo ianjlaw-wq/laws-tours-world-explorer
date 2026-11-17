@@ -8,7 +8,7 @@ Built with [Babylon.js](https://www.babylonjs.com/) (Apache-2.0), TypeScript and
 
 - **Touchscreen (landscape):** left thumb = floating joystick (push further to run), swipe the right side to look, pinch to zoom, JUMP button to jump.
 - **Keyboard & mouse:** WASD / arrow keys to walk, Shift to run, Space to jump, drag to look, mouse wheel to zoom.
-- URL options: `?fps` shows a frame-rate counter; `?quality=low` disables shadows.
+- URL options: `?fps` shows a frame-rate counter; `?quality=low` disables shadows and grass for slower phones.
 
 ## Develop
 
@@ -42,8 +42,9 @@ src/
 
 ## Accuracy and assets
 
-- **The landscape and ruins are an artistic approximation**, inspired by the real layout of Machu Picchu: the saddle between Machu Picchu Mountain and Huayna Picchu, the Sun Gate (Inti Punku) on the south-east ridge, the agricultural terraces, the main plaza, and the upper and lower sectors. Distances and heights are compressed for gameplay. It is **not** survey-accurate.
-- **No third-party art, models, textures or audio are used.** Everything is generated in code at load time. Only open-source libraries are used: Babylon.js (Apache-2.0) and Vite/TypeScript (MIT/Apache-2.0, build-time only).
+- **The landscape and ruins are an artistic approximation** inspired by the real layout of Machu Picchu (saddle between Machu Picchu Mountain and Huayna Picchu, Sun Gate on the south-east ridge, agricultural terraces, main plaza, upper/lower sectors). Distances and heights are compressed for gameplay; it is **not** survey-accurate.
+- **Photo textures:** CC0 (public domain) from Poly Haven. See `public/textures/LICENSE.md`. Regenerate with `node scripts/prepare-textures.mjs`.
+- Geometry, the explorer, foliage cards, clouds and audio are generated in code. Libraries: Babylon.js (Apache-2.0); Vite/TypeScript (build-time only).
 
 ## Status
 

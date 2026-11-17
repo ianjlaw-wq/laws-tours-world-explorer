@@ -1,9 +1,7 @@
 import { Scene } from '@babylonjs/core/scene';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
-import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
-import { Color3 } from '@babylonjs/core/Maths/math.color';
-import { Texture } from '@babylonjs/core/Materials/Textures/texture';
+import { groundMaterial } from './materials';
 import { fbm, ridged } from './noise';
 import { PADS, TRAIL, TRAIL_HALF_WIDTH } from './layout';
 
@@ -23,11 +21,6 @@ function smax(a: number, b: number, k: number): number {
   return Math.max(a, b) + (h * h * k) / 4;
 }
 
-function cone(x: number, z: number, cx: number, cz: number, peak: number, rTop: number, slope: number) {
-  const d = Math.hypot(x - cx, z - cz);
-  return peak - slope * Math.max(0, d - rTop);
-}
-
 function segDist(px: number, pz: number, ax: number, az: number, bx: number, bz: number) {
   const dx = bx - ax;
   const dz = bz - az;
@@ -38,6 +31,12 @@ function segDist(px: number, pz: number, ax: number, az: number, bx: number, bz:
 export const GORGE_FLOOR = -240;
 export const RIVER_Y = -246;
 
+/** Mountain profile: rounded summit (radius r0) blending into straight flanks. */
+function peak(x: number, z: number, cx: number, cz: number, top: number, r0: number, slope: number) {
+  const d = Math.hypot(x - cx, z - cz);
+  return top - slope * (Math.sqrt(d * d + r0 * r0) - r0);
+}
+
 /** Natural landform before site pads and the trail are applied. */
 function naturalHeight(x: number, z: number): number {
   // Urubamba gorge floor with a river channel looping round the ridge.
@@ -45,34 +44,49 @@ function naturalHeight(x: number, z: number): number {
   const riverCarve = 1 - smoothstep(10, 40, Math.abs(rRiver - 340));
   let h = GORGE_FLOOR + fbm(x / 60, z / 60, 3) * 6 - riverCarve * 14;
 
+  // Domain warp so mountains are not perfect cones.
+  const wx = x + fbm(x / 150 + 5.3, z / 150, 3) * 45;
+  const wz = z + fbm(x / 150, z / 150 + 9.1, 3) * 45;
+
   // Site saddle plateau (ellipse) with steep flanks.
   const ex = x / 58;
   const ez = (z - 10) / 125;
   const ell = (Math.sqrt(ex * ex + ez * ez) - 1) * 58;
   const plateau = 0 - 1.7 * Math.max(0, ell) - 0.4 * Math.max(0, ell) * Math.max(0, ell) * 0.02;
 
-  // Huayna Picchu: steep sugar-loaf peak to the north.
-  const hp = cone(x, z, -15, 215, 175, 4, 2.6) + fbm(x / 18, z / 18, 3) * 10;
+  // Huayna Picchu: steep sugar-loaf with a rounded crown and vertical flutes.
+  const hx = x + fbm(x / 60, z / 60 + 2, 2) * 10;
+  const hz = z + fbm(x / 60 + 7, z / 60, 2) * 10;
+  const hpAng = Math.atan2(hz - 215, hx + 15);
+  const hpD = Math.hypot(hx + 15, hz - 215);
+  const flutes = (ridged(hpAng * 2.6 + 4, hpD / 30, 3) - 0.5) * 16 * smoothstep(8, 40, hpD);
+  const hp = peak(hx, hz, -15, 215, 182, 14, 2.7) + flutes + fbm(x / 18, z / 18, 3) * 6;
   // Huchuy Picchu: the small hill between the city and Huayna Picchu.
-  const huchuy = cone(x, z, 10, 148, 34, 3, 1.6);
+  const huchuy = peak(x, z, 10, 148, 36, 8, 1.5);
 
   // Machu Picchu Mountain to the south.
-  const mpm = cone(x, z, -40, -330, 280, 10, 1.2);
+  const mpm = peak(wx, wz, -40, -330, 290, 25, 1.25);
 
   // Ridge from Machu Picchu Mountain out past the Sun Gate.
   const s = segDist(x, z, -40, -330, 205, -213);
   const ridgeTop = lerp(280, 18, s.t);
   const ridge = ridgeTop - 0.9 * Math.max(0, s.d - 6);
 
-  // Distant Andes: ring of ridged peaks beyond the gorge.
+  // Distant Andes: ring of warped, ridged peaks beyond the gorge.
   const r = Math.hypot(x, z);
-  const farMask = smoothstep(420, 1000, r);
-  const far = GORGE_FLOOR - 40 + farMask * (ridged(x / 650 + 3.1, z / 650 - 1.7) * 1250 + 120);
+  const farMask = smoothstep(480, 1250, r);
+  const fx = x + fbm(x / 400, z / 400 + 3, 3) * 220;
+  const fz = z + fbm(x / 400 + 8, z / 400, 3) * 220;
+  const far = GORGE_FLOOR - 40 + farMask * (
+    ridged(fx / 650 + 3.1, fz / 650 - 1.7) * 950 + ridged(fx / 170, fz / 170, 4) * 150 + 100);
 
   let m = smax(plateau, hp, 30);
   m = smax(m, huchuy, 12);
   m = smax(m, mpm, 40);
   m = smax(m, ridge, 25);
+  // Erosion-like spurs and gullies on the steep flanks (kept off the plateau).
+  const flank = smoothstep(-6, -40, m) * smoothstep(8, 30, ell) * (1 - smoothstep(150, 260, m));
+  m += (ridged(wx / 55, wz / 55, 3) - 0.45) * 26 * flank;
   m += fbm(x / 35, z / 35, 4) * 5 * smoothstep(-5, -40, m); // rugged flanks, smooth plateau
   m += fbm(x / 9, z / 9, 2) * 0.35; // fine undulation
   h = smax(h, m, 30);
@@ -181,33 +195,17 @@ export class TerrainGrid {
 // Mesh building
 // ----------------------------------------------------------------------------
 
-const C_GRASS = new Color3(0.36, 0.5, 0.2);
-const C_GRASS_LUSH = new Color3(0.28, 0.45, 0.16);
-const C_FOREST = new Color3(0.13, 0.27, 0.1);
-const C_ROCK = new Color3(0.42, 0.4, 0.36);
-const C_DIRT = new Color3(0.52, 0.42, 0.3);
-const C_SNOW = new Color3(0.92, 0.94, 0.97);
-const C_GORGE = new Color3(0.1, 0.2, 0.09);
-
-function colourFor(x: number, y: number, z: number, slope: number, out: number[], idx: number) {
-  const n = fbm(x / 14, z / 14, 2) * 0.5 + 0.5;
-  let c = Color3.Lerp(C_GRASS, C_GRASS_LUSH, n);
-  // Cloud-forest on steep flanks and lower slopes
-  // Cloud-forest clings even to very steep slopes here; only the sheerest faces are bare.
-  const forest = smoothstep(0.55, 1.0, slope);
-  c = Color3.Lerp(c, C_FOREST, Math.min(1, forest + smoothstep(-15, -60, y) * 0.8));
-  const cliff = smoothstep(2.4, 3.6, slope + fbm(x / 7, z / 7, 2) * 0.9);
-  c = Color3.Lerp(c, C_ROCK, cliff * (0.55 + 0.35 * n));
-  c = Color3.Lerp(c, C_GORGE, smoothstep(-150, -230, y) * 0.5);
-  // High distant peaks: rock then snow
-  c = Color3.Lerp(c, C_ROCK, smoothstep(350, 550, y));
-  c = Color3.Lerp(c, C_SNOW, smoothstep(650, 760, y + n * 60) * (1 - smoothstep(2.2, 3.2, slope) * 0.6));
-  // Trail
+/** Per-vertex splat weights: r = trail, g = forest canopy. */
+function splatFor(x: number, y: number, z: number, slope: number, out: Float32Array, idx: number) {
+  const n = fbm(x / 40, z / 40, 3) * 0.5 + 0.5;
+  const onSite = PADS.some((p) => x > p.x0 - 3 && x < p.x1 + 3 && z > p.z0 - 3 && z < p.z1 + 3);
+  let forest = smoothstep(0.45, 0.9, slope + (n - 0.5) * 0.5) * (1 - smoothstep(230, 330, y));
+  forest = Math.max(forest, smoothstep(-120, -200, y) * 0.9);
+  if (onSite) forest = 0;
   const t = trailInfo(x, z);
-  if (t.core > 0) c = Color3.Lerp(c, C_DIRT, t.core * 0.9);
-  out[idx] = c.r;
-  out[idx + 1] = c.g;
-  out[idx + 2] = c.b;
+  out[idx] = t.core * 0.95;
+  out[idx + 1] = Math.min(1, forest) * (1 - t.w);
+  out[idx + 2] = n;
   out[idx + 3] = 1;
 }
 
@@ -264,11 +262,11 @@ function buildGridMesh(
     VertexData.ComputeNormals(positions, indices, normals);
   }
 
-  const colours = new Array<number>(nx * nz * 4);
+  const splat = new Float32Array(nx * nz * 4);
   for (let k = 0; k < nx * nz; k++) {
     const ny = normals[k * 3 + 1];
     const slope = Math.sqrt(Math.max(0, 1 - ny * ny)) / Math.max(0.05, ny);
-    colourFor(positions[k * 3], positions[k * 3 + 1], positions[k * 3 + 2], slope, colours, k * 4);
+    splatFor(positions[k * 3], positions[k * 3 + 1], positions[k * 3 + 2], slope, splat, k * 4);
   }
 
   const vd = new VertexData();
@@ -276,16 +274,14 @@ function buildGridMesh(
   vd.indices = indices;
   vd.normals = normals;
   vd.uvs = uvs;
-  vd.colors = colours;
   const mesh = new Mesh(name, scene);
   vd.applyToMesh(mesh, false);
+  mesh.setVerticesData('splat', splat, false, 4);
   return mesh;
 }
 
-export function buildTerrain(scene: Scene, grid: TerrainGrid, detailTex: Texture): Mesh[] {
-  const mat = new StandardMaterial('terrainMat', scene);
-  mat.diffuseTexture = detailTex;
-  mat.specularColor = new Color3(0.02, 0.02, 0.02);
+export function buildTerrain(scene: Scene, grid: TerrainGrid): Mesh[] {
+  const mat = groundMaterial(scene, 'terrainMat', true);
 
   const near = buildGridMesh(
     'terrain-near', scene, grid.nx, grid.nz, DETAIL.x0, DETAIL.z0, DETAIL.step,
@@ -294,9 +290,9 @@ export function buildTerrain(scene: Scene, grid: TerrainGrid, detailTex: Texture
   near.material = mat;
   near.receiveShadows = true;
 
-  // Far terrain: coarse grid; vertices under the detail area are sunk out of sight.
+  // Far terrain: coarser grid; vertices under the detail area are sunk out of sight.
   const FAR = 4200;
-  const FN = 141;
+  const FN = 241;
   const fstep = (FAR * 2) / (FN - 1);
   const margin = fstep * 1.5;
   const far = buildGridMesh('terrain-far', scene, FN, FN, -FAR, -FAR, fstep, (_i, _j, x, z) => {
@@ -305,7 +301,7 @@ export function buildTerrain(scene: Scene, grid: TerrainGrid, detailTex: Texture
       x > DETAIL.x0 + margin && x < DETAIL.x1 - margin && z > DETAIL.z0 + margin && z < DETAIL.z1 - margin;
     return insideDetail ? h - 60 : h - 1.5;
   }, 60);
-  far.material = mat; // share: cloning would also clone (and blank) the DynamicTexture
+  far.material = mat;
 
   for (const m of [near, far]) {
     m.isPickable = false;

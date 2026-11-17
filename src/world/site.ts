@@ -3,25 +3,69 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
-import { Color3, Color4 } from '@babylonjs/core/Maths/math.color';
+import { Color3 } from '@babylonjs/core/Maths/math.color';
 import { Matrix, Quaternion, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector';
-import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 import { CollisionWorld } from './colliders';
 import { TerrainGrid, trailInfo, DETAIL } from './terrain';
-import { rng } from './noise';
+import { fbm, rng } from './noise';
 import {
   AG, EAST_Y, FLANK, GUARDHOUSE, PADS, PLAZA_Y, SUN_GATE, TRAIL, WEST_Y,
 } from './layout';
-import { cloudTexture, groundDetailTexture, stoneTexture, thatchTexture } from './textures';
+import { cloudTexture, grassBladeTexture, leafClusterTexture } from './textures';
+import { boulderMaterial, foliageMaterial, groundMaterial, stoneMaterial, tex, thatchMaterial } from './materials';
 
 type MatKey = 'stone' | 'fine' | 'grass' | 'thatch' | 'rock' | 'wood';
 
 /** Collects boxes per material, registers colliders, then merges into few draw calls. */
+interface WallTop { x: number; z: number; w: number; d: number; rot: number; top: number }
+
 class Builder {
   private groups = new Map<MatKey, Mesh[]>();
   private n = 0;
-  constructor(private scene: Scene, private world: CollisionWorld, private mats: Record<MatKey, StandardMaterial>) {}
+  private r = rng(2024);
+  /** When true, masonry walls get rubble/irregular capstones (roofless ruins). */
+  ruin = false;
+  readonly ruinTops: WallTop[] = [];
+  constructor(private scene: Scene, private world: CollisionWorld, readonly mats: Record<MatKey, StandardMaterial>) {}
+
+  /** Per-block tint variation and darker, weathered bases (vertex colours). */
+  private paint(m: Mesh, masonry: boolean, tint = 1) {
+    const pos = m.getVerticesData('position')!;
+    const n = pos.length / 3;
+    const t = (0.84 + this.r() * 0.24) * tint;
+    const warm = 1 + (this.r() - 0.5) * 0.06;
+    const cols = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      const f = masonry && pos[i * 3 + 1] < 0 ? 0.68 : 1;
+      cols[i * 4] = t * warm * f;
+      cols[i * 4 + 1] = t * f;
+      cols[i * 4 + 2] = (t / warm) * 0.97 * f;
+      cols[i * 4 + 3] = 1;
+    }
+    m.setVerticesData('color', cols);
+  }
+
+  /** Highest surface (terrain or box top) under a point, not above maxY. */
+  groundUnder(x: number, z: number, maxY: number): number {
+    return this.world.groundAt(x, z, maxY, 0).y;
+  }
+
+  /** Inca walls lean inwards (batter): narrow the top along the wall's thin axis. */
+  private batter(m: Mesh, w: number, d: number, h: number) {
+    const pos = m.getVerticesData('position')!;
+    const thinX = w <= d;
+    const half = (thinX ? w : d) / 2;
+    const t = Math.min(0.07 * h, half * 0.36);
+    const k = (half - t) / half;
+    for (let i = 0; i < pos.length; i += 3) {
+      if (pos[i + 1] > 0) {
+        if (thinX) pos[i] *= k;
+        else pos[i + 2] *= k;
+      }
+    }
+    m.setVerticesData('position', pos);
+  }
 
   private add(key: MatKey, m: Mesh) {
     let g = this.groups.get(key);
@@ -30,17 +74,23 @@ class Builder {
   }
 
   /** Axis box centred at (x,z) with local width w (x) and depth d (z), from y0 to y1, yawed by rot. */
-  block(key: MatKey, x: number, z: number, w: number, d: number, y0: number, y1: number, rot = 0, collide = true, tile = 2.2) {
+  block(key: MatKey, x: number, z: number, w: number, d: number, y0: number, y1: number, rot = 0, collide = true, tile = 0) {
     const h = y1 - y0;
+    if (!tile) tile = key === 'fine' ? 2.4 : key === 'grass' ? 6 : 1.9;
     const fu = (a: number, b: number) => new Vector4(0, 0, a / tile, b / tile);
     const m = MeshBuilder.CreateBox('b' + this.n++, {
       width: w, height: h, depth: d, wrap: true,
       faceUV: [fu(w, h), fu(w, h), fu(d, h), fu(d, h), fu(w, d), fu(w, d)],
     }, this.scene);
+    const masonry = key === 'stone' || key === 'fine';
+    const wallLike = masonry && h > 1 && Math.min(w, d) <= 1.6;
+    if (wallLike) this.batter(m, w, d, h);
+    this.paint(m, masonry);
     m.position.set(x, y0 + h / 2, z);
     m.rotation.y = rot;
     this.add(key, m);
     if (collide) this.world.addBox(x, z, w, d, y0, y1, rot);
+    if (this.ruin && wallLike && collide) this.ruinTops.push({ x, z, w, d, rot, top: y1 });
     return m;
   }
 
@@ -48,7 +98,10 @@ class Builder {
   wall(key: MatKey, x1: number, z1: number, x2: number, z2: number, y0: number, y1: number, thick = 0.8) {
     const len = Math.hypot(x2 - x1, z2 - z1);
     const rot = Math.atan2(x2 - x1, z2 - z1); // local z along the wall
+    const was = this.ruin;
+    this.ruin = true;
     this.block(key, (x1 + x2) / 2, (z1 + z2) / 2, thick, len, y0, y1, rot);
+    this.ruin = was;
   }
 
   /** Triangular prism (gable or roof). Span along local x, ridge along local z. */
@@ -71,6 +124,20 @@ class Builder {
     const m = new Mesh('p' + this.n++, this.scene);
     vd.applyToMesh(m);
     m.convertToFlatShadedMesh();
+    // planar UVs per face: slopes run along the ridge, gable ends face-on
+    {
+      const fp = m.getVerticesData('position')!;
+      const fn = m.getVerticesData('normal')!;
+      const uvs = new Float32Array((fp.length / 3) * 2);
+      const tile = key === 'thatch' ? 1.6 : 1.9;
+      for (let i = 0; i < fp.length / 3; i++) {
+        const [px, py, pz] = [fp[i * 3], fp[i * 3 + 1], fp[i * 3 + 2]];
+        if (Math.abs(fn[i * 3 + 2]) > 0.5) { uvs[i * 2] = px / tile; uvs[i * 2 + 1] = py / tile; }
+        else { uvs[i * 2] = pz / tile; uvs[i * 2 + 1] = (Math.abs(px) + (height - py)) / tile; }
+      }
+      m.setVerticesData('uv', uvs);
+    }
+    this.paint(m, false);
     m.position.set(x, baseY, z);
     m.rotation.y = rot;
     this.add(key, m);
@@ -78,7 +145,8 @@ class Builder {
   }
 
   rock(x: number, z: number, sx: number, sy: number, sz: number, y: number, rot = 0, collide = true) {
-    const m = MeshBuilder.CreateIcoSphere('r' + this.n++, { radius: 1, subdivisions: 1, flat: true }, this.scene);
+    const m = boulderMesh(this.scene, 'r' + this.n++, this.n * 7.3);
+    this.paint(m, false, 1.05);
     m.scaling.set(sx, sy, sz);
     m.position.set(x, y, z);
     m.rotation.set(0.1 * Math.sin(x), rot, 0.1 * Math.cos(z));
@@ -98,6 +166,8 @@ class Builder {
     const top = floor + h;
     const hw = w / 2;
     const hd = d / 2;
+    const was = this.ruin;
+    this.ruin = !opts.roof;
     // back wall
     let [px, pz] = L(0, -hd + t / 2);
     this.block(key, px, pz, w, t, floor - 0.6, top, rot);
@@ -115,6 +185,7 @@ class Builder {
     this.block(key, px, pz, leftW, t, floor - 0.6, top, rot);
     [px, pz] = L(hw - rightW / 2, hd - t / 2);
     this.block(key, px, pz, rightW, t, floor - 0.6, top, rot);
+    this.ruin = was;
     [px, pz] = L(doorX, hd - t / 2);
     if (h > 2.3) this.block(key, px, pz, door + 0.2, t, floor + 2.15, top, rot, false);
     // gable end walls on the short sides
@@ -143,7 +214,7 @@ class Builder {
     for (let i = 1; i <= n; i++) {
       const len = (n - i + 1) * run; // each step reaches all the way to the top edge
       const mid = len / 2;
-      this.block(key, x - fx * mid, z - fz * mid, width, len, y0 - 0.4, y0 + rise * i, rot, true, 1.2);
+      this.block(key, x - fx * mid, z - fz * mid, width, len, y0 - 0.4, y0 + rise * i, rot, true, 1.1);
     }
   }
 
@@ -188,30 +259,41 @@ function orientOutward(p: number[], idx: number[]): number[] {
   return out;
 }
 
-function mat(scene: Scene, name: string, colour: Color3, tex?: Texture, spec = 0.04): StandardMaterial {
-  const m = new StandardMaterial(name, scene);
-  m.diffuseColor = colour;
-  if (tex) m.diffuseTexture = tex;
-  m.specularColor = new Color3(spec, spec, spec);
+/** Irregular, smooth granite boulder: displaced icosphere. */
+function boulderMesh(scene: Scene, name: string, seed: number, subdivisions = 3): Mesh {
+  const m = MeshBuilder.CreateIcoSphere(name, { radius: 1, subdivisions }, scene);
+  const pos = m.getVerticesData('position')!;
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = pos[i], y = pos[i + 1], z = pos[i + 2];
+    let k = 1 + fbm(x * 1.4 + seed, z * 1.4 + y * 1.1 - seed, 3) * 0.32;
+    if (y < -0.35) k *= 0.75 + 0.25 * (1 + y); // flatter base
+    pos[i] = x * k;
+    pos[i + 1] = Math.max(y * k, -0.55);
+    pos[i + 2] = z * k;
+  }
+  const normals: number[] = [];
+  VertexData.ComputeNormals(pos, m.getIndices()!, normals);
+  m.setVerticesData('position', pos);
+  m.setVerticesData('normal', normals);
   return m;
 }
 
 export interface SiteResult {
   shadowCasters: Mesh[];
   clouds: Mesh[];
+  grass: Mesh;
 }
 
 export function buildSite(scene: Scene, world: CollisionWorld, grid: TerrainGrid): SiteResult {
-  const stoneTex = stoneTexture(scene, 3);
-  const fineTex = stoneTexture(scene, 9, true);
-  const detail = groundDetailTexture(scene);
+  const wood = new StandardMaterial('woodMat', scene);
+  wood.diffuseColor = new Color3(0.4, 0.28, 0.16);
   const mats: Record<MatKey, StandardMaterial> = {
-    stone: mat(scene, 'stoneMat', new Color3(1.0, 0.98, 0.93), stoneTex),
-    fine: mat(scene, 'fineStoneMat', new Color3(0.95, 0.92, 0.86), fineTex, 0.08),
-    grass: mat(scene, 'grassMat', new Color3(0.34, 0.47, 0.2), detail),
-    thatch: mat(scene, 'thatchMat', new Color3(0.95, 0.9, 0.8), thatchTexture(scene)),
-    rock: mat(scene, 'rockMat', new Color3(0.55, 0.53, 0.5), stoneTex),
-    wood: mat(scene, 'woodMat', new Color3(0.4, 0.28, 0.16)),
+    stone: stoneMaterial(scene, 'stoneMat', 'wall_rough', new Color3(0.9, 0.9, 0.88)),
+    fine: stoneMaterial(scene, 'fineStoneMat', 'wall_fine', new Color3(1.08, 1.06, 1.02)),
+    grass: groundMaterial(scene, 'lawnMat', false),
+    thatch: thatchMaterial(scene),
+    rock: boulderMaterial(scene),
+    wood,
   };
   const b = new Builder(scene, world, mats);
   const casters: Mesh[] = [];
@@ -225,10 +307,14 @@ export function buildSite(scene: Scene, world: CollisionWorld, grid: TerrainGrid
 
   b.finish(casters);
 
+  const rubble = buildRubble(scene, b);
+  casters.push(rubble);
   buildTrailPaving(scene, grid);
   buildTrees(scene, grid);
+  const grass = buildGrass(scene, world, grid);
+  buildScatterRocks(scene, grid, b.mats.rock);
   const clouds = buildClouds(scene);
-  return { shadowCasters: casters, clouds };
+  return { shadowCasters: casters, clouds, grass };
 }
 
 // ----------------------------------------------------------------------------
@@ -461,9 +547,64 @@ function buildIntihuatana(b: Builder) {
 // Decorative (non-colliding) layers
 // ----------------------------------------------------------------------------
 
+function buildRubble(scene: Scene, b: Builder): Mesh {
+  // Irregular capstones and loose blocks along the tops of roofless walls, plus fallen stones.
+  const stone = MeshBuilder.CreateBox('rubble', { size: 1, wrap: true }, scene);
+  stone.material = b.mats.stone;
+  stone.receiveShadows = true;
+  stone.isPickable = false;
+  const r = rng(31);
+  const matrices: number[] = [];
+  const tmp = Matrix.Identity();
+  const push = (x: number, y: number, z: number, sx: number, sy: number, sz: number, yaw: number, tilt: number) => {
+    Matrix.ComposeToRef(new Vector3(sx, sy, sz), Quaternion.FromEulerAngles(tilt * (r() - 0.5), yaw, tilt * (r() - 0.5)), new Vector3(x, y, z), tmp);
+    matrices.push(...tmp.toArray());
+  };
+  for (const t of b.ruinTops) {
+    const alongZ = t.d >= t.w;
+    const len = alongZ ? t.d : t.w;
+    const thick = Math.min(t.w, t.d);
+    const c = Math.cos(t.rot), s = Math.sin(t.rot);
+    let u = -len / 2 + 0.2;
+    while (u < len / 2 - 0.2) {
+      const sl = 0.35 + r() * 0.45;
+      if (r() < 0.72) {
+        const lx = alongZ ? (r() - 0.5) * thick * 0.25 : u + sl / 2;
+        const lz = alongZ ? u + sl / 2 : (r() - 0.5) * thick * 0.25;
+        const sy = 0.18 + r() * 0.3;
+        push(t.x + lx * c + lz * s, t.top + sy / 2 - 0.06, t.z - lx * s + lz * c,
+          alongZ ? thick * (0.55 + r() * 0.3) : sl, sy, alongZ ? sl : thick * (0.55 + r() * 0.3), t.rot, 0.15);
+      }
+      u += sl + 0.04;
+    }
+    // a few fallen blocks at the foot of the wall
+    for (let k = 0; k < len / 3; k++) {
+      if (r() > 0.45) continue;
+      const side = r() < 0.5 ? -1 : 1;
+      const lu = (r() - 0.5) * len;
+      const lo = side * (thick / 2 + 0.3 + r() * 0.8);
+      const lx = alongZ ? lo : lu;
+      const lz = alongZ ? lu : lo;
+      const sz = 0.25 + r() * 0.3;
+      const wx = t.x + lx * c + lz * s;
+      const wz = t.z - lx * s + lz * c;
+      const gy = b.groundUnder(wx, wz, t.top - 1);
+      push(wx, gy + sz * 0.35, wz, sz * 1.3, sz, sz, r() * 6.28, 0.5);
+    }
+  }
+  stone.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
+  stone.freezeWorldMatrix();
+  return stone;
+}
+
 function buildTrailPaving(scene: Scene, grid: TerrainGrid) {
-  const slab = MeshBuilder.CreateBox('trailSlab', { width: 0.95, height: 0.22, depth: 0.75 }, scene);
-  const m = mat(scene, 'slabMat', new Color3(0.66, 0.63, 0.58), stoneTexture(scene, 41, true));
+  // Irregular polygonal flagstones (7-sided slabs) along the Inca Trail.
+  const slab = MeshBuilder.CreateCylinder('trailSlab', { height: 0.22, diameter: 1, tessellation: 7 }, scene);
+  const m = new StandardMaterial('slabMat', scene);
+  m.diffuseTexture = tex(scene, 'boulder_diff');
+  m.bumpTexture = tex(scene, 'boulder_nor');
+  m.diffuseColor = new Color3(1.05, 1.03, 0.98);
+  m.specularColor = new Color3(0.04, 0.04, 0.04);
   slab.material = m;
   slab.receiveShadows = true;
   slab.isPickable = false;
@@ -475,17 +616,18 @@ function buildTrailPaving(scene: Scene, grid: TerrainGrid) {
     const c = TRAIL[i + 1];
     const len = Math.hypot(c.x - a.x, c.z - a.z);
     const rot = Math.atan2(c.x - a.x, c.z - a.z);
-    const steps = Math.floor(len / 0.85);
+    const steps = Math.floor(len / 0.7);
     for (let k = 0; k < steps; k++) {
       const t = k / steps;
-      for (const lane of [-0.55, 0.5]) {
-        if (r() < 0.12) continue; // missing stones
-        const px = a.x + (c.x - a.x) * t + Math.cos(rot) * (lane + (r() - 0.5) * 0.2);
-        const pz = a.z + (c.z - a.z) * t - Math.sin(rot) * (lane + (r() - 0.5) * 0.2);
-        const py = grid.heightAt(px, pz) - 0.07;
-        const q = Quaternion.FromEulerAngles((r() - 0.5) * 0.06, rot + (r() - 0.5) * 0.35, (r() - 0.5) * 0.06);
-        const s = 0.75 + r() * 0.4;
-        Matrix.ComposeToRef(new Vector3(s, 1, s), q, new Vector3(px, py, pz), tmp);
+      for (const lane of [-0.75, 0, 0.72]) {
+        if (r() < 0.14) continue; // missing stones
+        const off = lane + (r() - 0.5) * 0.25;
+        const px = a.x + (c.x - a.x) * t + Math.cos(rot) * off;
+        const pz = a.z + (c.z - a.z) * t - Math.sin(rot) * off;
+        const py = grid.heightAt(px, pz) - 0.08;
+        const q = Quaternion.FromEulerAngles((r() - 0.5) * 0.06, r() * 6.28, (r() - 0.5) * 0.06);
+        const sx = 0.62 + r() * 0.35;
+        Matrix.ComposeToRef(new Vector3(sx, 1, sx * (0.7 + r() * 0.4)), q, new Vector3(px, py, pz), tmp);
         matrices.push(...tmp.toArray());
       }
     }
@@ -494,53 +636,184 @@ function buildTrailPaving(scene: Scene, grid: TerrainGrid) {
   slab.freezeWorldMatrix();
 }
 
-function buildTrees(scene: Scene, grid: TerrainGrid) {
-  // Low-poly cloud-forest tree built from two meshes with vertex colours.
-  const trunk = MeshBuilder.CreateCylinder('trunk', { height: 3, diameterTop: 0.25, diameterBottom: 0.45, tessellation: 5 }, scene);
-  trunk.position.y = 1.5;
-  const crown = MeshBuilder.CreateIcoSphere('crown', { radius: 2.2, subdivisions: 1, flat: true }, scene);
-  crown.scaling.set(1, 1.15, 1);
-  crown.position.y = 4.2;
-  const crown2 = MeshBuilder.CreateIcoSphere('crown2', { radius: 1.5, subdivisions: 1, flat: true }, scene);
-  crown2.position.set(0.8, 5.6, 0.3);
-  const paint = (m: Mesh, c: Color4) => {
-    const n = m.getTotalVertices();
-    const cols = new Array(n * 4);
-    for (let i = 0; i < n; i++) { cols[i * 4] = c.r; cols[i * 4 + 1] = c.g; cols[i * 4 + 2] = c.b; cols[i * 4 + 3] = 1; }
-    m.setVerticesData('color', cols);
-  };
-  paint(trunk, new Color4(0.32, 0.22, 0.14, 1));
-  paint(crown, new Color4(0.16, 0.33, 0.12, 1));
-  paint(crown2, new Color4(0.2, 0.38, 0.14, 1));
-  const tree = Mesh.MergeMeshes([trunk, crown, crown2], true)!;
-  tree.name = 'tree';
-  const tm = new StandardMaterial('treeMat', scene);
-  tm.specularColor = Color3.Black();
-  tree.material = tm;
-  tree.isPickable = false;
+/** Cloud-forest tree: tapered trunk with branches and an alpha-card crown with soft radial normals. */
+function makeTreeMeshes(scene: Scene, cardCount: number, suffix: string): { trunk: Mesh; crown: Mesh } {
+  const parts: Mesh[] = [];
+  const trunk0 = MeshBuilder.CreateCylinder('t0', { height: 5.2, diameterTop: 0.2, diameterBottom: 0.5, tessellation: 7 }, scene);
+  trunk0.position.y = 2.6;
+  parts.push(trunk0);
+  for (let i = 0; i < 4; i++) {
+    const br = MeshBuilder.CreateCylinder('br' + i, { height: 2.2, diameterTop: 0.06, diameterBottom: 0.16, tessellation: 5 }, scene);
+    const a = i * 1.7;
+    br.position.set(Math.cos(a) * 0.55, 3.6 + i * 0.35, Math.sin(a) * 0.55);
+    br.rotation.set(Math.sin(a) * 0.9, 0, -Math.cos(a) * 0.9);
+    parts.push(br);
+  }
+  const trunk = Mesh.MergeMeshes(parts, true)!;
+  trunk.name = 'treeTrunk' + suffix;
+  const bark = new StandardMaterial('barkMat', scene);
+  bark.diffuseTexture = tex(scene, 'boulder_diff');
+  bark.diffuseColor = new Color3(0.42, 0.33, 0.24);
+  bark.specularColor = Color3.Black();
+  trunk.material = bark;
 
+  const cards: Mesh[] = [];
+  const r = rng(8);
+  const centre = new Vector3(0, 5.6, 0);
+  const big = cardCount < 8 ? 1.35 : 1;
+  for (let i = 0; i < cardCount; i++) {
+    const p = MeshBuilder.CreatePlane('c' + i, { size: (2.4 + r() * 1.4) * big }, scene);
+    const a = r() * Math.PI * 2;
+    const e = (r() - 0.35) * 1.4;
+    p.position.set(Math.cos(a) * 1.4 * Math.cos(e), centre.y + Math.sin(e) * 1.2, Math.sin(a) * 1.4 * Math.cos(e));
+    p.rotation.set((r() - 0.5) * 1.2, r() * Math.PI, (r() - 0.5) * 0.8);
+    p.bakeCurrentTransformIntoVertices();
+    cards.push(p);
+  }
+  const crown = Mesh.MergeMeshes(cards, true)!;
+  crown.name = 'treeCrown' + suffix;
+  // radial normals give soft, volumetric foliage lighting
+  const pos = crown.getVerticesData('position')!;
+  const nrm = new Float32Array(pos.length);
+  for (let i = 0; i < pos.length; i += 3) {
+    const v = new Vector3(pos[i] - centre.x, (pos[i + 1] - centre.y) * 0.8 + 0.6, pos[i + 2] - centre.z).normalize();
+    nrm[i] = v.x; nrm[i + 1] = v.y; nrm[i + 2] = v.z;
+  }
+  crown.setVerticesData('normal', nrm);
+  crown.material = foliageMaterial(scene, 'leafMat' + suffix, leafClusterTexture(scene), 0.018);
+  return { trunk, crown };
+}
+
+function buildTrees(scene: Scene, grid: TerrainGrid) {
+  // Detailed crowns near the explorable area, lighter 5-card crowns further away.
+  const nearSet = { ...makeTreeMeshes(scene, 10, ''), matrices: [] as number[], colours: [] as number[] };
+  const farSet = { ...makeTreeMeshes(scene, 5, 'Far'), matrices: [] as number[], colours: [] as number[] };
   const r = rng(99);
-  const matrices: number[] = [];
   const tmp = Matrix.Identity();
   const inPad = (x: number, z: number) =>
     PADS.some((p) => x > p.x0 - 4 && x < p.x1 + 4 && z > p.z0 - 4 && z < p.z1 + 4);
   let placed = 0;
-  for (let i = 0; i < 9000 && placed < 2200; i++) {
-    const x = DETAIL.x0 + r() * (DETAIL.x1 - DETAIL.x0);
-    const z = DETAIL.z0 + r() * (DETAIL.z1 - DETAIL.z0);
+  for (let i = 0; i < 16000 && placed < 3000; i++) {
+    // denser near the site, sparser further out
+    const near = r() < 0.55;
+    const x = near ? -110 + r() * 220 : DETAIL.x0 + r() * (DETAIL.x1 - DETAIL.x0);
+    const z = near ? -170 + r() * 300 : DETAIL.z0 + r() * (DETAIL.z1 - DETAIL.z0);
     if (inPad(x, z)) continue;
     if (trailInfo(x, z).w > 0.02) continue;
     const y = grid.heightAt(x, z);
-    if (y > 150 || y < -235) continue;
+    if (y > 175 || y < -238) continue;
     const slope = grid.slopeAt(x, z);
-    if (slope > 2.3) continue;
-    const s = 0.8 + r() * 0.9;
-    Matrix.ComposeToRef(new Vector3(s, s * (0.9 + r() * 0.4), s), Quaternion.FromEulerAngles(0, r() * 6.28, 0), new Vector3(x, y - 0.3, z), tmp);
+    if (slope > 2.6 || slope < 0.25) continue;
+    // clumping
+    if (fbm(x / 30, z / 30, 2) < -0.15 && r() < 0.7) continue;
+    const s = 0.75 + r() * 0.75;
+    Matrix.ComposeToRef(new Vector3(s, s * (0.85 + r() * 0.5), s), Quaternion.FromEulerAngles(0, r() * 6.28, 0), new Vector3(x, y - 0.3, z), tmp);
+    const set = Math.abs(x) < 120 && z > -200 && z < 160 ? nearSet : farSet;
+    set.matrices.push(...tmp.toArray());
+    const g = 0.62 + r() * 0.32;
+    set.colours.push(g * (0.82 + r() * 0.2), g, g * (0.75 + r() * 0.2), 1);
+    placed++;
+  }
+  for (const set of [nearSet, farSet]) {
+    const buf = new Float32Array(set.matrices);
+    for (const m of [set.trunk, set.crown]) {
+      m.thinInstanceSetBuffer('matrix', buf, 16, true);
+      m.isPickable = false;
+      m.freezeWorldMatrix();
+    }
+    set.crown.thinInstanceSetBuffer('color', new Float32Array(set.colours), 4, true);
+  }
+}
+
+function buildGrass(scene: Scene, world: CollisionWorld, grid: TerrainGrid): Mesh {
+  // Andean bunch grass (ichu) tufts: three crossed alpha cards, lit like the ground.
+  const quads: Mesh[] = [];
+  for (let i = 0; i < 3; i++) {
+    const p = MeshBuilder.CreatePlane('g' + i, { width: 0.7, height: 0.5 }, scene);
+    p.position.y = 0.23;
+    p.rotation.y = (i * Math.PI) / 3;
+    p.bakeCurrentTransformIntoVertices();
+    quads.push(p);
+  }
+  const tuft = Mesh.MergeMeshes(quads, true)!;
+  tuft.name = 'grassTufts';
+  const n = tuft.getTotalVertices();
+  const up = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) up[i * 3 + 1] = 1;
+  tuft.setVerticesData('normal', up);
+  tuft.material = foliageMaterial(scene, 'grassTuftMat', grassBladeTexture(scene), 0.09);
+  tuft.isPickable = false;
+
+  const r = rng(55);
+  const matrices: number[] = [];
+  const colours: number[] = [];
+  const tmp = Matrix.Identity();
+  const onLawn = (x: number, z: number) => PADS.some((p) => x > p.x0 && x < p.x1 && z > p.z0 && z < p.z1);
+  let placed = 0;
+  for (let i = 0; i < 60000 && placed < 6000; i++) {
+    let x: number, z: number;
+    if (r() < 0.85) {
+      x = -95 + r() * 190;
+      z = -135 + r() * 245;
+    } else {
+      // along the Inca Trail
+      const seg = Math.floor(r() * (TRAIL.length - 1));
+      const a = TRAIL[seg], c = TRAIL[seg + 1];
+      const t = r();
+      const off = (r() - 0.5) * 16;
+      const rot = Math.atan2(c.x - a.x, c.z - a.z);
+      x = a.x + (c.x - a.x) * t + Math.cos(rot) * off;
+      z = a.z + (c.z - a.z) * t - Math.sin(rot) * off;
+    }
+    const tr = trailInfo(x, z);
+    if (tr.core > 0.3) continue;
+    const terr = grid.heightAt(x, z);
+    const g = world.groundAt(x, z, terr + 3, 0).y;
+    if (world.solidAt(x, g + 0.3, z, 0.12)) continue; // inside a wall
+    const nearWall = world.solidAt(x, g + 0.3, z, 0.9);
+    const slope = grid.slopeAt(x, z);
+    if (slope > 1.6) continue;
+    const lawn = onLawn(x, z) && !nearWall;
+    if (lawn && r() > 0.12) continue;
+    if (!nearWall && !lawn && r() > 0.6) continue;
+    const s = (nearWall ? 0.9 : 0.7) + r() * 0.6;
+    Matrix.ComposeToRef(new Vector3(s, s * (0.7 + r() * 0.6), s), Quaternion.FromEulerAngles(0, r() * 6.28, 0), new Vector3(x, g - 0.03, z), tmp);
+    matrices.push(...tmp.toArray());
+    const dry = r();
+    const k = 0.8 + r() * 0.3;
+    // olive-green to straw (ichu)
+    colours.push(k * (0.78 + dry * 0.42), k * (0.86 + dry * 0.06), k * (0.55 - dry * 0.15), 1);
+    placed++;
+  }
+  tuft.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
+  tuft.thinInstanceSetBuffer('color', new Float32Array(colours), 4, true);
+  tuft.freezeWorldMatrix();
+  return tuft;
+}
+
+function buildScatterRocks(scene: Scene, grid: TerrainGrid, mat: StandardMaterial) {
+  const rock = boulderMesh(scene, 'scatterRock', 3.3, 2);
+  rock.material = mat;
+  rock.isPickable = false;
+  rock.receiveShadows = true;
+  const r = rng(71);
+  const matrices: number[] = [];
+  const tmp = Matrix.Identity();
+  const inPad = (x: number, z: number) => PADS.some((p) => x > p.x0 - 1 && x < p.x1 + 1 && z > p.z0 - 1 && z < p.z1 + 1);
+  let placed = 0;
+  for (let i = 0; i < 12000 && placed < 700; i++) {
+    const x = -150 + r() * 330;
+    const z = -280 + r() * 450;
+    if (inPad(x, z) || trailInfo(x, z).core > 0.1) continue;
+    const slope = grid.slopeAt(x, z);
+    if (slope < 0.3 && r() < 0.8) continue;
+    const s = 0.2 + Math.pow(r(), 3) * 1.6;
+    Matrix.ComposeToRef(new Vector3(s * (0.8 + r() * 0.6), s * (0.5 + r() * 0.4), s), Quaternion.FromEulerAngles((r() - 0.5) * 0.4, r() * 6.28, (r() - 0.5) * 0.4), new Vector3(x, grid.heightAt(x, z) + s * 0.1, z), tmp);
     matrices.push(...tmp.toArray());
     placed++;
   }
-  tree.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
-  tree.freezeWorldMatrix();
+  rock.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
+  rock.freezeWorldMatrix();
 }
 
 function buildClouds(scene: Scene): Mesh[] {
@@ -548,23 +821,31 @@ function buildClouds(scene: Scene): Mesh[] {
   const m = new StandardMaterial('cloudMat', scene);
   m.diffuseTexture = tex;
   m.opacityTexture = tex;
-  m.emissiveColor = new Color3(0.85, 0.87, 0.9);
+  m.emissiveColor = new Color3(0.92, 0.93, 0.95);
   m.disableLighting = true;
   m.backFaceCulling = false;
   m.fogEnabled = true;
+  m.disableDepthWrite = true;
   const r = rng(13);
   const clouds: Mesh[] = [];
-  for (let i = 0; i < 26; i++) {
-    const p = MeshBuilder.CreatePlane('cloud' + i, { size: 1 }, scene);
-    const s = 60 + r() * 110;
-    p.scaling.set(s * 1.6, s * 0.6, 1);
-    const a = r() * Math.PI * 2;
-    const d = 140 + r() * 360;
-    p.position.set(Math.cos(a) * d, -150 + r() * 160, 20 + Math.sin(a) * d);
+  const add = (x: number, y: number, z: number, w: number, h: number) => {
+    const p = MeshBuilder.CreatePlane('cloud' + clouds.length, { size: 1 }, scene);
+    p.scaling.set(w, h, 1);
+    p.position.set(x, y, z);
     p.billboardMode = Mesh.BILLBOARDMODE_Y;
     p.material = m;
     p.isPickable = false;
     clouds.push(p);
+  };
+  // drifting cloud banks in the gorge, below and around the city
+  for (let i = 0; i < 30; i++) {
+    const s = 70 + r() * 130;
+    const a = r() * Math.PI * 2;
+    const d = 150 + r() * 420;
+    add(Math.cos(a) * d, -170 + r() * 150, 20 + Math.sin(a) * d, s * 1.8, s * 0.55);
   }
+  // wisps clinging to Huayna Picchu and Machu Picchu Mountain
+  for (let i = 0; i < 6; i++) add(-15 + (r() - 0.5) * 110, 40 + r() * 90, 215 + (r() - 0.5) * 80, 60 + r() * 50, 18 + r() * 14);
+  for (let i = 0; i < 5; i++) add(-40 + (r() - 0.5) * 160, 120 + r() * 120, -330 + (r() - 0.5) * 120, 70 + r() * 60, 20 + r() * 16);
   return clouds;
 }
