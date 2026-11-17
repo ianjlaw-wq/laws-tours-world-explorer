@@ -14,6 +14,7 @@ export class FollowCamera {
   readonly cam: ArcRotateCamera;
   private desiredRadius = 6.5;
   private target = new Vector3();
+  private goal = new Vector3();
   private initialised = false;
 
   constructor(scene: Scene, private world: CollisionWorld) {
@@ -56,7 +57,7 @@ export class FollowCamera {
     }
 
     // Smoothly follow the explorer's upper body
-    const goal = focus.add(new Vector3(0, 1.55, 0));
+    const goal = this.goal.set(focus.x, focus.y + 1.55, focus.z);
     if (!this.initialised) { this.target.copyFrom(goal); this.initialised = true; }
     const k = 1 - Math.exp(-10 * dt);
     this.target.x += (goal.x - this.target.x) * k;

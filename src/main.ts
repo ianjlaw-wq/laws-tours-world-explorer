@@ -137,6 +137,7 @@ async function boot() {
 
   // ---------------- Game loop ----------------
   let time = 0;
+  let smoothDt = 1 / 60;
   let zoneCheck = 0;
   const fpsEl = $('fps');
   const showFps = params.has('fps');
@@ -145,7 +146,10 @@ async function boot() {
   let downgraded = 0;
 
   engine.runRenderLoop(() => {
-    const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
+    // lightly smoothed frame delta: removes judder from uneven frame pacing
+    const rawDt = Math.min(engine.getDeltaTime() / 1000, 0.05);
+    smoothDt += (rawDt - smoothDt) * 0.3;
+    const dt = smoothDt;
     time += dt;
     setMaterialTime(time);
 

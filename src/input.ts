@@ -16,7 +16,6 @@ export class Input {
 
   private keys = new Set<string>();
   private joyId: number | null = null;
-  private joyCenter = { x: 0, y: 0 };
   private joyVec = { x: 0, y: 0 };
   private lookPointers = new Map<number, { x: number; y: number }>();
   private pinchDist = 0;
@@ -35,17 +34,17 @@ export class Input {
 
     // Camera look: mouse drag or touch swipe on the canvas
     canvas.addEventListener('pointerdown', (e) => {
-      canvas.setPointerCapture(e.pointerId);
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
       this.lookPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.lookPointers.size === 2) this.pinchDist = this.currentPinch();
     });
     canvas.addEventListener('pointermove', (e) => {
       const p = this.lookPointers.get(e.pointerId);
       if (!p) return;
-      if (this.lookPointers.size === 2) {
+      if (this.lookPointers.size >= 2) {
         p.x = e.clientX; p.y = e.clientY;
         const d = this.currentPinch();
-        this.zoomDelta += (this.pinchDist - d) * 0.03;
+        if (this.pinchDist > 0) this.zoomDelta += (this.pinchDist - d) * 0.03;
         this.pinchDist = d;
         this.lastLookTime = performance.now();
         return;
@@ -56,9 +55,21 @@ export class Input {
       p.x = e.clientX; p.y = e.clientY;
       this.lastLookTime = performance.now();
     });
-    const endLook = (e: PointerEvent) => { this.lookPointers.delete(e.pointerId); };
+    const endLook = (e: PointerEvent) => {
+      this.lookPointers.delete(e.pointerId);
+      // remaining finger continues from its own last position (no jump)
+      if (this.lookPointers.size < 2) this.pinchDist = 0;
+    };
     canvas.addEventListener('pointerup', endLook);
     canvas.addEventListener('pointercancel', endLook);
+    canvas.addEventListener('lostpointercapture', endLook);
+
+    // Block browser gestures (scroll, pull-to-refresh, double-tap / pinch page zoom) during play,
+    // but allow scrolling inside panels marked .scrollable.
+    const allowScroll = (t: EventTarget | null) => t instanceof Element && !!t.closest('.scrollable');
+    document.addEventListener('touchmove', (e) => { if (!allowScroll(e.target)) e.preventDefault(); }, { passive: false });
+    document.addEventListener('gesturestart', (e) => e.preventDefault());
+    document.addEventListener('dblclick', (e) => e.preventDefault());
     canvas.addEventListener('wheel', (e) => {
       this.zoomDelta += Math.sign(e.deltaY) * 0.8;
       this.lastLookTime = performance.now();
@@ -75,50 +86,68 @@ export class Input {
     return pts.length < 2 ? 0 : Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
   }
 
+  /**
+   * Fixed joystick anchored bottom-left. Only a touch that STARTS on the joystick activates it,
+   * and only that pointer id drives it; every other finger is free for camera/pinch/buttons.
+   */
   private setupJoystick() {
     const zone = document.getElementById('joystick-zone')!;
     const base = document.getElementById('joystick-base')!;
     const knob = document.getElementById('joystick-knob')!;
-    const R = 56; // max knob travel in px
-    const restLeft = base.style.left;
-    const restBottom = base.style.bottom;
+    const R = 52; // max knob travel in px
 
     const setKnob = (dx: number, dy: number) => {
       knob.style.transform = `translate(${dx}px, ${dy}px)`;
     };
-    zone.addEventListener('pointerdown', (e) => {
-      if (this.joyId !== null) return;
-      this.joyId = e.pointerId;
-      zone.setPointerCapture(e.pointerId);
-      // floating joystick: recentre the base under the thumb
-      const zr = zone.getBoundingClientRect();
-      const size = base.offsetWidth;
-      base.style.left = `${e.clientX - zr.left - size / 2}px`;
-      base.style.bottom = `${zr.bottom - e.clientY - size / 2}px`;
-      this.joyCenter = { x: e.clientX, y: e.clientY };
-      this.joyVec = { x: 0, y: 0 };
-      setKnob(0, 0);
-      e.preventDefault();
-    });
-    zone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== this.joyId) return;
-      let dx = e.clientX - this.joyCenter.x;
-      let dy = e.clientY - this.joyCenter.y;
+    const update = (clientX: number, clientY: number) => {
+      // centre is read from the live layout so rotation/resizes never displace input
+      const r = base.getBoundingClientRect();
+      let dx = clientX - (r.left + r.width / 2);
+      let dy = clientY - (r.top + r.height / 2);
       const d = Math.hypot(dx, dy);
       if (d > R) { dx = (dx / d) * R; dy = (dy / d) * R; }
       setKnob(dx, dy);
       this.joyVec = { x: dx / R, y: -dy / R };
-    });
-    const end = (e: PointerEvent) => {
-      if (e.pointerId !== this.joyId) return;
+    };
+    const release = () => {
       this.joyId = null;
       this.joyVec = { x: 0, y: 0 };
       setKnob(0, 0);
-      base.style.left = restLeft;
-      base.style.bottom = restBottom;
+      zone.classList.remove('active');
+    };
+    this.releaseJoystick = release;
+
+    zone.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.joyId !== null) return; // already held by another finger
+      this.joyId = e.pointerId;
+      try { zone.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+      zone.classList.add('active');
+      update(e.clientX, e.clientY);
+    });
+    zone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== this.joyId) return;
+      e.preventDefault();
+      update(e.clientX, e.clientY);
+    });
+    const end = (e: PointerEvent) => {
+      if (e.pointerId === this.joyId) release();
     };
     zone.addEventListener('pointerup', end);
     zone.addEventListener('pointercancel', end);
+    zone.addEventListener('lostpointercapture', end);
+    // app switched / screen locked: never leave the explorer walking on its own
+    document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+    window.addEventListener('blur', release);
+  }
+
+  /** Release the joystick (also used when menus/dialogue take over). */
+  releaseJoystick: () => void = () => {};
+
+  /** Joystick base position (for tests). */
+  joystickActive() {
+    return this.joyId !== null;
   }
 
   private setupJumpButton() {
@@ -170,8 +199,11 @@ export class Input {
     return j;
   }
 
+  private look = { dx: 0, dy: 0, zoom: 0 };
+  /** Returns a reused object (no per-frame allocation). */
   consumeLook(): { dx: number; dy: number; zoom: number } {
-    const r = { dx: this.lookDX, dy: this.lookDY, zoom: this.zoomDelta };
+    const r = this.look;
+    r.dx = this.lookDX; r.dy = this.lookDY; r.zoom = this.zoomDelta;
     this.lookDX = 0; this.lookDY = 0; this.zoomDelta = 0;
     return r;
   }

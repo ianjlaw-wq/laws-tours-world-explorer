@@ -82,8 +82,6 @@ export function buildEnvironment(scene: Scene, quality: 'high' | 'low', mobile: 
   let shadows: ShadowGenerator | null = null;
   if (quality === 'high') {
     shadows = new ShadowGenerator(mobile ? 1024 : 2048, sun);
-    // statics dominate the caster list; refreshing every other frame halves the shadow pass cost
-    if (mobile) shadows.getShadowMap()!.refreshRate = 2;
     shadows.bias = 0.0012;
     shadows.normalBias = 0.025;
     shadows.usePercentageCloserFiltering = true;
