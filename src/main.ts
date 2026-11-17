@@ -13,6 +13,7 @@ import { FollowCamera } from './camera';
 import { Input } from './input';
 import { Ambience } from './audio';
 import { Adventure } from './game/adventure';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -68,7 +69,8 @@ async function boot() {
   const player = new PlayerController(world, PLAYER_START, startHeading);
   const camera = new FollowCamera(scene, world);
   camera.setBehind(startHeading);
-  camera.cam.beta = 1.32;
+  // a slightly raised view: Killa, waiting beyond the gate, shows above the explorer's shoulder
+  camera.cam.beta = 1.2;
   scene.activeCamera = camera.cam;
 
   if (env.shadows) {
@@ -96,6 +98,7 @@ async function boot() {
   await nextFrame();
   // Render behind the loading screen so shaders compile; continue when ready (or after a timeout).
   let warmup = true;
+  adventure.setWarmup(true); // compile the living-city shaders now, not mid-game
   engine.runRenderLoop(() => { if (warmup) scene.render(); });
   const t0 = performance.now();
   while (!scene.isReady() && performance.now() - t0 < 20000) await nextFrame();
@@ -105,6 +108,7 @@ async function boot() {
   }
   warmup = false;
   engine.stopRenderLoop();
+  adventure.setWarmup(false);
   setProgress(1, 'Ready');
 
   // ---------------- UI wiring ----------------
@@ -131,18 +135,14 @@ async function boot() {
     bannerTimer = 4;
   };
 
-  const soundBtn = $<HTMLButtonElement>('btn-sound');
-  soundBtn.addEventListener('click', () => {
-    audio.setMuted(!audio.muted);
-    soundBtn.textContent = audio.muted ? '🔇' : '🔊';
-  });
+  // sound, voice and subtitle controls (CC, speaker, settings) are wired by the adventure
   const help = $('help');
-  $('btn-help').addEventListener('click', () => { help.hidden = false; });
   $('help-close').addEventListener('click', () => { help.hidden = true; });
 
   let playing = false;
   startBtn.addEventListener('click', () => {
     audio.start();
+    adventure.voice.unlock(); // inside the tap: lets Killa speak automatically later
     $('loading').classList.add('fade');
     setTimeout(() => { $('loading').hidden = true; }, 700);
     $('hud').hidden = false;
@@ -170,8 +170,43 @@ async function boot() {
   let perfAccum = 0;
   let perfFrames = 0;
   let downgraded = 0;
+  // Frame-time instrumentation (?fps): separates a steady low frame rate from intermittent spikes,
+  // and JavaScript update time from render submission time. No allocations per frame.
+  const FT_N = 240;
+  const frameMs = new Float32Array(FT_N);
+  const jsMs = new Float32Array(FT_N);
+  const renderMs = new Float32Array(FT_N);
+  let ftIndex = 0;
+  let ftCount = 0;
+  let lastFrameAt = performance.now();
+  const totals = { frames: 0, over33: 0, over50: 0, over100: 0 };
+  let statTimer = 0;
+  // draw calls per frame = change in the engine's running total
+  const drawCounter = (engine as unknown as { _drawCalls?: { total: number } })._drawCalls;
+  let drawTotal = 0;
+  let drawsLastFrame = 0;
+  const frameStats = () => {
+    const n = Math.min(ftCount, FT_N);
+    let sum = 0, worst = 0, o33 = 0, o50 = 0, js = 0, jsWorst = 0, rn = 0, rnWorst = 0;
+    for (let i = 0; i < n; i++) {
+      const f = frameMs[i];
+      sum += f; if (f > worst) worst = f;
+      if (f > 33.4) o33++;
+      if (f > 50) o50++;
+      js += jsMs[i]; if (jsMs[i] > jsWorst) jsWorst = jsMs[i];
+      rn += renderMs[i]; if (renderMs[i] > rnWorst) rnWorst = renderMs[i];
+    }
+    const k = Math.max(1, n);
+    return {
+      frames: n, avgMs: sum / k, fps: (1000 * k) / Math.max(1, sum), worstMs: worst, over33: o33, over50: o50,
+      jsAvgMs: js / k, jsWorstMs: jsWorst, renderAvgMs: rn / k, renderWorstMs: rnWorst, totals: { ...totals },
+    };
+  };
 
   engine.runRenderLoop(() => {
+    const frameStart = performance.now();
+    const ft = frameStart - lastFrameAt;
+    lastFrameAt = frameStart;
     // lightly smoothed frame delta: removes judder from uneven frame pacing
     const rawDt = Math.min(engine.getDeltaTime() / 1000, 0.05);
     smoothDt += (rawDt - smoothDt) * 0.3;
@@ -200,7 +235,7 @@ async function boot() {
       explorerFade = fade;
       for (const m of explorer.meshes) m.visibility = fade;
     }
-    env.follow(player.pos);
+    env.follow(adventure.shadowFocus ?? player.pos);
     animateClouds(site.clouds, time);
     audio.update(dt);
 
@@ -208,8 +243,10 @@ async function boot() {
     zoneCheck -= dt;
     if (zoneCheck <= 0 && playing) {
       zoneCheck = 0.4;
-      const z = ZONES.find((zn) => Math.hypot(player.pos.x - zn.x, player.pos.z - zn.z) < zn.r);
-      const name = z?.name ?? '';
+      let name = '';
+      for (const zn of ZONES) {
+        if (Math.hypot(player.pos.x - zn.x, player.pos.z - zn.z) < zn.r) { name = zn.name; break; }
+      }
       if (name && name !== currentZone) { showBanner(name); adventure.discover(name); }
       currentZone = name;
     }
@@ -218,14 +255,37 @@ async function boot() {
       if (bannerTimer <= 0) banner.classList.remove('show');
     }
 
+    const renderStart = performance.now();
     scene.render();
+    const frameEnd = performance.now();
+    if (drawCounter) { drawsLastFrame = drawCounter.total - drawTotal; drawTotal = drawCounter.total; }
+    if (playing) {
+      frameMs[ftIndex] = ft;
+      jsMs[ftIndex] = renderStart - frameStart;
+      renderMs[ftIndex] = frameEnd - renderStart;
+      ftIndex = (ftIndex + 1) % FT_N;
+      ftCount++;
+      totals.frames++;
+      if (ft > 33.4) totals.over33++;
+      if (ft > 50) totals.over50++;
+      if (ft > 100) totals.over100++;
+    }
+    if (showFps) {
+      statTimer += rawDt;
+      if (statTimer >= 1) {
+        statTimer = 0;
+        const st = frameStats();
+        fpsEl.textContent = `${st.fps.toFixed(0)} fps · avg ${st.avgMs.toFixed(1)} ms · worst ${st.worstMs.toFixed(0)} ms · ` +
+          `spikes >33ms ${st.over33} / >50ms ${st.over50} (last ${st.frames}) · js ${st.jsAvgMs.toFixed(1)}/${st.jsWorstMs.toFixed(0)} ms · ` +
+          `render ${st.renderAvgMs.toFixed(1)}/${st.renderWorstMs.toFixed(0)} ms · draws ${drawsLastFrame} · x${pixelRatio.toFixed(2)}`;
+      }
+    }
 
     // Adaptive quality: if frame rate stays low, reduce resolution, then shadows.
     perfAccum += dt;
     perfFrames++;
     if (perfAccum >= 3) {
       const fps = perfFrames / perfAccum;
-      if (showFps) fpsEl.textContent = `${fps.toFixed(0)} fps · x${pixelRatio.toFixed(2)}`;
       if (playing && fps < 38 && downgraded < 4) {
         downgraded++;
         if (pixelRatio > 1) {
@@ -254,8 +314,22 @@ async function boot() {
     input,
     world,
     adventure,
-    /** Complete the transformation immediately (tests). */
-    skipIntro: () => { adventure.startTransformation(); adventure.skipTransformation(); },
+    /** Complete the opening (Killa's welcome + transformation) immediately (tests). */
+    skipIntro: () => adventure.completeOpening(),
+    /** Frame-time statistics over the last 240 frames, plus totals since start. */
+    perfStats: () => frameStats(),
+    /** Draw calls, active meshes and totals (instrumentation enabled on first call). */
+    sceneStats: () => {
+      return {
+        drawCalls: drawsLastFrame,
+        activeMeshes: scene.getActiveMeshes().length,
+        meshes: scene.meshes.length,
+        enabledMeshes: scene.meshes.filter((m) => m.isEnabled() && m.isVisible).length,
+        materials: scene.materials.length,
+        particles: scene.particleSystems.map((p) => `${p.name}:${p.getActiveCount()}`).join(','),
+        pixelRatio,
+      };
+    },
     teleport: (x: number, z: number, heading?: number) => {
       player.pos.set(x, world.groundAt(x, z, 1000, 2000).y, z);
       player.vel.setAll(0);
@@ -263,6 +337,14 @@ async function boot() {
       camera.snap();
     },
     fps: () => engine.getFps(),
+    /** World point -> CSS pixel position on screen (tests: is something in frame?). */
+    project: (x: number, y: number, z: number) => {
+      const w = engine.getRenderWidth();
+      const h = engine.getRenderHeight();
+      const v = Vector3.Project(new Vector3(x, y, z), Matrix.IdentityReadOnly, scene.getTransformMatrix(), camera.cam.viewport.toGlobal(w, h));
+      const k = canvas.clientWidth / w;
+      return { x: v.x * k, y: v.y * k, depth: v.z };
+    },
     /** Deterministic fixed-step simulation of the controller (for automated tests). */
     simulate: (seconds: number, moveX: number, moveY: number, run = false, jumpAt = -1) => {
       let maxY = -Infinity;

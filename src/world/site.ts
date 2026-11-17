@@ -13,12 +13,13 @@ import {
   AG, CHAMBER, EAST_Y, FLANK, GUARDHOUSE, PADS, PLAZA_Y, SUN_GATE, TRAIL, WEST_Y,
 } from './layout';
 import { cloudTexture, grassBladeTexture, leafClusterTexture } from './textures';
-import { boulderMaterial, foliageMaterial, groundMaterial, stoneMaterial, tex, thatchMaterial } from './materials';
+import { boulderMaterial, cropMaterial, foliageMaterial, groundMaterial, stoneMaterial, tex, thatchMaterial } from './materials';
+import { maizeMesh, potatoMesh } from './crops';
 
 type MatKey = 'stone' | 'fine' | 'grass' | 'thatch' | 'rock' | 'wood';
 
 /** Collects boxes per material, registers colliders, then merges into few draw calls. */
-interface WallTop { x: number; z: number; w: number; d: number; rot: number; top: number }
+interface WallTop { x: number; z: number; w: number; d: number; rot: number; top: number; gable: boolean }
 
 export class Builder {
   private groups = new Map<MatKey, Mesh[]>();
@@ -26,6 +27,8 @@ export class Builder {
   private r = rng(2024);
   /** When true, masonry walls get rubble/irregular capstones (roofless ruins). */
   ruin = false;
+  /** walls being built belong to a house with stone gable ends */
+  private gableCtx = false;
   readonly ruinTops: WallTop[] = [];
   /** Roofless houses: get thatched roofs in the 15th-century era. */
   readonly ruinHouses: Array<{ x: number; z: number; w: number; d: number; rot: number; top: number; gable: boolean }> = [];
@@ -94,7 +97,7 @@ export class Builder {
     m.rotation.y = rot;
     this.add(key, m);
     if (collide) this.world.addBox(x, z, w, d, y0, y1, rot);
-    if (this.ruin && wallLike && collide) this.ruinTops.push({ x, z, w, d, rot, top: y1 });
+    if (this.ruin && wallLike && collide) this.ruinTops.push({ x, z, w, d, rot, top: y1, gable: this.gableCtx });
     return m;
   }
 
@@ -172,6 +175,7 @@ export class Builder {
     const hd = d / 2;
     const was = this.ruin;
     this.ruin = !opts.roof;
+    this.gableCtx = !!opts.gable;
     // back wall
     let [px, pz] = L(0, -hd + t / 2);
     this.block(key, px, pz, w, t, floor - 0.6, top, rot);
@@ -190,6 +194,7 @@ export class Builder {
     [px, pz] = L(hw - rightW / 2, hd - t / 2);
     this.block(key, px, pz, rightW, t, floor - 0.6, top, rot);
     this.ruin = was;
+    this.gableCtx = false;
     [px, pz] = L(doorX, hd - t / 2);
     if (h > 2.3) this.block(key, px, pz, door + 0.2, t, floor + 2.15, top, rot, false);
     // gable end walls on the short sides
@@ -290,7 +295,21 @@ export interface SiteResult {
   rubble: Mesh;
   builder: Builder;
   /** 15th-century era layers (hidden until the transformation) */
-  era: { roofs: Mesh; roofMat: StandardMaterial; crops: Mesh; chimneys: Vector3[] };
+  era: EraLayers;
+}
+
+/** 15th-century layers, each animated in by the transformation. */
+export interface EraLayers {
+  /** thatched roofs (drop into place) */
+  roofs: Mesh;
+  roofMat: StandardMaterial;
+  /** restored top courses of the ruined walls (rise out of the walls) */
+  courses: Mesh;
+  /** tilled soil beds on the cultivated terraces (rise through the lawn) */
+  soil: Mesh;
+  /** maize (two models: husked ears / ripe ears) and potatoes (grow up from the soil) */
+  crops: Mesh[];
+  chimneys: Vector3[];
 }
 
 export function buildSite(scene: Scene, world: CollisionWorld, grid: TerrainGrid): SiteResult {
@@ -769,16 +788,49 @@ function buildTrees(scene: Scene, grid: TerrainGrid) {
   }
 }
 
-/** Thatched roofs for every roofless house, maize on the lower terraces, chimney points for smoke. */
-function buildEraLayers(scene: Scene, b: Builder, world: CollisionWorld) {
+/** Height of the restored masonry course added to ruined walls in the living city. */
+export const COURSE_H = 0.6;
+
+/**
+ * The living city: restored wall courses, thatched roofs, tilled soil with rows of maize (lower
+ * terraces) and potatoes (higher, colder terraces), and chimney points for hearth smoke.
+ * Crop placement is an artistic impression of cultivated terraces.
+ */
+function buildEraLayers(scene: Scene, b: Builder, world: CollisionWorld): EraLayers {
+  // ---- restored courses on top of every ruined wall (except gabled houses) ----
+  const course: Mesh[] = [];
+  for (const t of b.ruinTops) {
+    if (t.gable) continue;
+    const thinX = t.w <= t.d;
+    const w = thinX ? t.w * 0.86 : t.w;
+    const d = thinX ? t.d : t.d * 0.86;
+    const m = MeshBuilder.CreateBox('c', {
+      width: w, height: COURSE_H, depth: d, wrap: true,
+      faceUV: [new Vector4(0, 0, w / 1.9, COURSE_H / 1.9), new Vector4(0, 0, w / 1.9, COURSE_H / 1.9), new Vector4(0, 0, d / 1.9, COURSE_H / 1.9), new Vector4(0, 0, d / 1.9, COURSE_H / 1.9), new Vector4(0, 0, w / 1.9, d / 1.9), new Vector4(0, 0, w / 1.9, d / 1.9)],
+    }, scene);
+    m.position.set(t.x, t.top + COURSE_H / 2 - 0.03, t.z);
+    m.rotation.y = t.rot;
+    course.push(m);
+  }
+  const courses = course.length ? Mesh.MergeMeshes(course, true, true)! : new Mesh('eraCourses', scene);
+  courses.name = 'eraCourses';
+  // freshly dressed stone is paler than the weathered ruins
+  const courseMat = stoneMaterial(scene, 'courseMat', 'wall_rough', new Color3(1.08, 1.05, 1.0));
+  courses.material = courseMat;
+  courses.receiveShadows = true;
+  courses.isPickable = false;
+  courses.setEnabled(false);
+
+  // ---- thatched roofs on every roofless house (sitting on the restored courses) ----
   const roofMat = thatchMaterial(scene);
   roofMat.name = 'eraThatch';
   b.collect = false;
   const parts: Mesh[] = [];
   const chimneys: Vector3[] = [];
   b.ruinHouses.forEach((h, i) => {
-    parts.push(b.prism('thatch', h.x, h.z, h.d + 1.3, h.d * 0.42 + 0.55, h.w + 0.9, h.top - 0.5, h.rot + Math.PI / 2));
-    if (i % 3 === 0) chimneys.push(new Vector3(h.x, h.top + h.d * 0.42 + 0.2, h.z));
+    const base = h.top - 0.5 + (h.gable ? 0 : COURSE_H);
+    parts.push(b.prism('thatch', h.x, h.z, h.d + 1.3, h.d * 0.42 + 0.55, h.w + 0.9, base, h.rot + Math.PI / 2));
+    if (i % 3 === 0) chimneys.push(new Vector3(h.x, base + h.d * 0.42 + 0.7, h.z));
   });
   b.collect = true;
   const roofs = parts.length ? Mesh.MergeMeshes(parts, true)! : new Mesh('eraRoofs', scene);
@@ -788,52 +840,109 @@ function buildEraLayers(scene: Scene, b: Builder, world: CollisionWorld) {
   roofs.isPickable = false;
   roofs.setEnabled(false);
 
-  // Maize: two crossed tall cards per plant, in rows on terraces 1-4 (artistic impression).
-  const cards: Mesh[] = [];
-  for (let i = 0; i < 2; i++) {
-    const p = MeshBuilder.CreatePlane('m' + i, { width: 0.55, height: 1.5 }, scene);
-    p.position.y = 0.72;
-    p.rotation.y = (i * Math.PI) / 2;
-    p.bakeCurrentTransformIntoVertices();
-    cards.push(p);
-  }
-  const plant = Mesh.MergeMeshes(cards, true)!;
-  plant.name = 'eraCrops';
-  const n = plant.getTotalVertices();
-  const up = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) up[i * 3 + 1] = 1;
-  plant.setVerticesData('normal', up);
-  plant.material = foliageMaterial(scene, 'cropMat', grassBladeTexture(scene), 0.06);
-  plant.isPickable = false;
+  // ---- cultivated terraces ----
+  const MAIZE_TERRACES = [1, 2, 3, 4, 5];
+  const POTATO_TERRACES = [6, 7, 8];
   const r = rng(77);
-  const matrices: number[] = [];
-  const colours: number[] = [];
+  const soilParts: Mesh[] = [];
+  const maizeA: number[] = [];
+  const maizeB: number[] = [];
+  const potatoes: number[] = [];
+  const colA: number[] = [];
+  const colB: number[] = [];
+  const colP: number[] = [];
   const tmp = Matrix.Identity();
-  for (let k = 1; k <= 4; k++) {
+  const q = new Quaternion();
+  const sv = new Vector3();
+  const pv = new Vector3();
+  const blocked = (x: number, k: number) =>
+    Math.abs(x - AG.stairX) < 1.6 || (k % 3 === 0 && Math.abs(x - (-24 + k * 0.4)) < 1.3);
+  for (const k of [...MAIZE_TERRACES, ...POTATO_TERRACES]) {
+    const maize = MAIZE_TERRACES.includes(k);
     const zf = AG.zStart - AG.depth * k;
     const zb = zf - AG.depth;
-    const x0 = AG.x0 + 2.2 * Math.sin(k * 1.7) + k * 0.4 + 1;
-    const x1 = AG.x1 - 1.8 * Math.cos(k * 1.3) - k * 0.3 - 1;
-    for (let z = zb + 1.0; z < zf - 1.4; z += 1.3) {
-      for (let x = x0; x < x1; x += 1.1) {
-        if (Math.abs(x - AG.stairX) < 1.8) continue;
-        if (k % 3 === 0 && Math.abs(x - (-24 + k * 0.4)) < 1.5) continue;
-        const px = x + (r() - 0.5) * 0.3;
-        const pz = z + (r() - 0.5) * 0.2;
-        const g = world.groundAt(px, pz, AG.rise * (k + 1) + 0.3, 0).y;
-        const s = 0.8 + r() * 0.35;
-        Matrix.ComposeToRef(new Vector3(s, s * (0.85 + r() * 0.3), s), Quaternion.FromEulerAngles(0, r() * 6.28, 0), new Vector3(px, g - 0.02, pz), tmp);
-        matrices.push(...tmp.toArray());
-        const kk = 0.85 + r() * 0.2;
-        colours.push(kk * 0.6, kk * 0.68, kk * 0.36, 1);
+    const x0 = AG.x0 + 2.2 * Math.sin(k * 1.7) + k * 0.4 + 1.2;
+    const x1 = AG.x1 - 1.8 * Math.cos(k * 1.3) - k * 0.3 - 1.2;
+    const top = AG.rise * (k + 1);
+    // soil beds: one bed either side of the stairway (and of the west stair on every third terrace)
+    const cuts = [x0, AG.stairX - 1.6, AG.stairX + 1.6, x1];
+    for (let c = 0; c < cuts.length; c += 2) {
+      const bx0 = cuts[c], bx1 = cuts[c + 1];
+      if (bx1 - bx0 < 1) continue;
+      const bed = MeshBuilder.CreateBox('soil', {
+        width: bx1 - bx0, height: 0.14, depth: zf - 1.25 - (zb + 0.35), wrap: true,
+        faceUV: Array(6).fill(new Vector4(0, 0, (bx1 - bx0) / 3, (zf - 1.6 - zb) / 3)),
+      }, scene);
+      bed.position.set((bx0 + bx1) / 2, top + 0.03, (zf - 1.25 + zb + 0.35) / 2);
+      soilParts.push(bed);
+      // furrows: low ridges along the terrace, under each crop row
+      const rows = maize ? [zb + 1.0, zb + 2.3, zb + 3.6] : [zb + 0.9, zb + 1.9, zb + 2.9, zb + 3.9];
+      for (const rz of rows) {
+        const ridge = MeshBuilder.CreateBox('ridge', {
+          width: bx1 - bx0 - 0.4, height: 0.12, depth: 0.42, wrap: true,
+          faceUV: Array(6).fill(new Vector4(0, 0, (bx1 - bx0) / 3, 0.2)),
+        }, scene);
+        ridge.position.set((bx0 + bx1) / 2, top + 0.12, rz);
+        soilParts.push(ridge);
+      }
+    }
+    const rows = maize ? [zb + 1.0, zb + 2.3, zb + 3.6] : [zb + 0.9, zb + 1.9, zb + 2.9, zb + 3.9];
+    const step = maize ? 0.85 : 0.7;
+    for (const rz of rows) {
+      for (let x = x0 + 0.4; x < x1 - 0.4; x += step) {
+        if (blocked(x, k)) continue;
+        const px = x + (r() - 0.5) * 0.18;
+        const pz = rz + (r() - 0.5) * 0.14;
+        const g = world.groundAt(px, pz, top + 0.3, 0).y + 0.16;
+        if (maize) {
+          const s = 0.82 + r() * 0.36; // natural height variation
+          Quaternion.FromEulerAnglesToRef((r() - 0.5) * 0.1, r() * 6.283, (r() - 0.5) * 0.1, q);
+          sv.set(s * (0.9 + r() * 0.2), s, s * (0.9 + r() * 0.2));
+          pv.set(px, g - 0.03, pz);
+          Matrix.ComposeToRef(sv, q, pv, tmp);
+          const ripe = r() < 0.28;
+          (ripe ? maizeB : maizeA).push(...tmp.toArray());
+          const kk = 0.9 + r() * 0.18;
+          (ripe ? colB : colA).push(kk, kk * (0.97 + r() * 0.06), kk, 1);
+        } else {
+          const s = 0.75 + r() * 0.5;
+          Quaternion.FromEulerAnglesToRef(0, r() * 6.283, 0, q);
+          sv.set(s, s * (0.8 + r() * 0.4), s);
+          pv.set(px, g - 0.02, pz);
+          Matrix.ComposeToRef(sv, q, pv, tmp);
+          potatoes.push(...tmp.toArray());
+          const kk = 0.85 + r() * 0.3;
+          colP.push(kk, kk, kk, 1);
+        }
       }
     }
   }
-  plant.thinInstanceSetBuffer('matrix', new Float32Array(matrices), 16, true);
-  plant.thinInstanceSetBuffer('color', new Float32Array(colours), 4, true);
-  plant.freezeWorldMatrix();
-  plant.setEnabled(false);
-  return { roofs, roofMat, crops: plant, chimneys };
+  const soil = Mesh.MergeMeshes(soilParts, true, true)!;
+  soil.name = 'eraSoil';
+  const soilMat = new StandardMaterial('soilMat', scene);
+  soilMat.diffuseTexture = tex(scene, 'trail_diff');
+  soilMat.diffuseColor = new Color3(0.78, 0.6, 0.45);
+  soilMat.specularColor = new Color3(0.02, 0.02, 0.02);
+  soil.material = soilMat;
+  soil.receiveShadows = true;
+  soil.isPickable = false;
+  soil.freezeWorldMatrix();
+  soil.setEnabled(false);
+
+  const cropMat = cropMaterial(scene, 'cropMat', 0.025);
+  const crops: Mesh[] = [];
+  const addCrop = (m: Mesh, mats: number[], cols: number[]) => {
+    m.material = cropMat;
+    m.thinInstanceSetBuffer('matrix', new Float32Array(mats), 16, true);
+    m.thinInstanceSetBuffer('color', new Float32Array(cols), 4, true);
+    m.isPickable = false;
+    m.setEnabled(false);
+    crops.push(m);
+  };
+  addCrop(maizeMesh(scene, 'eraCrops', false), maizeA, colA);
+  addCrop(maizeMesh(scene, 'eraMaizeRipe', true), maizeB, colB);
+  addCrop(potatoMesh(scene, 'eraPotatoes'), potatoes, colP);
+  return { roofs, roofMat, courses, soil, crops, chimneys };
 }
 
 function buildGrass(scene: Scene, world: CollisionWorld, grid: TerrainGrid): Mesh {

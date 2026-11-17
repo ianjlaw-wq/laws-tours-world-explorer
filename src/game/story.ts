@@ -5,10 +5,10 @@ export type NoteKind = 'history' | 'story';
 export interface Note { kind: NoteKind; title: string; text: string }
 
 export const OBJECTIVES: Record<string, string> = {
-  walk: 'Walk the Inca Trail through the Sun Gate towards Machu Picchu.',
-  meet: 'Someone is waiting at the guardhouse above the terraces. Go and meet them.',
-  gold: 'Follow the trail of gold down the terrace staircase.',
-  puzzle: 'Examine the carved stone wheels in front of the terrace wall.',
+  walk: 'Pass through the Sun Gate. Someone is waiting for you on the trail.',
+  meet: 'Talk to Killa, your guide to Machu Picchu.',
+  gold: 'Follow the trail and the gold coins down to the carved doorway below the terraces.',
+  puzzle: 'You found the carved doorway! Examine the turning stones in front of it.',
   chamber: 'The way is open. Enter the hidden chamber.',
   explore: 'Explore freely. Discover every landmark of Machu Picchu.',
 };
@@ -26,6 +26,7 @@ export const LANDMARK_NOTES: Record<string, Note> = {
   'Temple of the Condor': { kind: 'history', title: 'Temple of the Condor', text: 'Natural rock formations here are commonly interpreted as the outstretched wings of a condor, with a carved stone on the ground as its head.' },
   'Sacred Rock': { kind: 'history', title: 'Sacred Rock', text: 'A large flat stone at the north end of the site, set in front of the mountains, flanked by two three-walled halls (wayronas).' },
   'Eastern Residential Sector': { kind: 'history', title: 'Residential sector', text: 'Groups of houses around small courtyards. Ordinary walls used fieldstone set in clay mortar; the finest fitted masonry was reserved for important buildings.' },
+  'The Carved Doorway': { kind: 'story', title: 'The Carved Doorway', text: 'A sealed doorway with a golden sun, guarded by three turning stones. The doorway, its decorations and the stones are invented for the game.' },
   'The Hidden Chamber': { kind: 'story', title: 'The Hidden Chamber', text: 'This chamber and its stone mechanism are invented for the game. No such room is known at Machu Picchu.' },
 };
 
@@ -38,75 +39,147 @@ export const GENERAL_NOTES: Note[] = [
 ];
 
 // ---------------- Dialogue ----------------
+// Every node's text is spoken by Killa (speech synthesis or, later, a recorded clip) and shown as a
+// subtitle. Nodes without choices continue to `next` automatically when the line has been spoken.
 
 export interface DialogueChoice { text: string; next: string | null; effect?: string }
-export interface DialogueNode { speaker: string; text: string; choices: DialogueChoice[]; note?: Note }
+export interface DialogueNode {
+  speaker: string;
+  text: string;
+  choices: DialogueChoice[];
+  /** continue automatically to this node (when there are no choices) */
+  next?: string | null;
+  /** run when the line has finished (e.g. 'transform') */
+  effect?: string;
+  note?: Note;
+  /** optional recorded voice clip (future) */
+  clip?: string;
+}
 
-export const INTRO_DIALOGUE: Record<string, DialogueNode> = {
-  start: {
-    speaker: 'Killa',
-    text: 'Allillanchu! Welcome, traveller. You came down from Inti Punku, the Gate of the Sun. Few arrive by that road unless they have walked a long way.',
+const K = 'Killa';
+
+/** Pieces shared by several conversations. */
+const DIRECTIONS: Record<string, DialogueNode> = {
+  way: {
+    speaker: K,
+    text: 'Your first adventure is waiting below. Follow this trail down to the terraces, then follow the gold coins down the great stairway.',
+    choices: [], next: 'door',
+  },
+  door: {
+    speaker: K,
+    text: 'At the bottom you will find a carved doorway with a golden sun, and torches burning beside it. In front of it stand the turning stones.',
     choices: [
+      { text: 'I\'m on my way!', next: null, effect: 'finishIntro' },
+      { text: 'What are the turning stones?', next: 'stones' },
+    ],
+  },
+  stones: {
+    speaker: K,
+    text: 'The elders say they guard a sealed chamber. The three worlds open the way: the condor above, the puma between, the serpent below.',
+    choices: [{ text: 'Thank you, Killa. I\'m on my way!', next: null, effect: 'finishIntro' }],
+  },
+};
+
+/** First meeting, just beyond the Sun Gate (present-day ruins, before the transformation). */
+export const MEET_DIALOGUE: Record<string, DialogueNode> = {
+  start: {
+    speaker: K,
+    text: 'Allillanchu! Hello, traveller, and welcome to Machu Picchu. My name is Killa.',
+    choices: [], next: 'ruins',
+  },
+  ruins: {
+    speaker: K,
+    text: 'Today these are quiet ruins. But I can show you this mountain as my people knew it, more than five hundred years ago.',
+    choices: [], next: 'watch',
+  },
+  watch: {
+    speaker: K,
+    text: 'Look out over the city, and watch it come alive!',
+    choices: [], next: 'living', effect: 'transform',
+  },
+  living: {
+    speaker: K,
+    text: 'This is Machu Picchu around the year 1450, in the time of the Inca. Smoke rises from the hearths, and maize grows on the terraces.',
+    note: { kind: 'story', title: 'An artistic impression', text: 'The people, roofs, crops and smoke show the idea of a living Inca estate. They are not a reconstruction of a specific day.' },
+    choices: [], next: 'way',
+  },
+  ...DIRECTIONS,
+};
+
+/** First meeting for older saves that had already seen the transformation. */
+export const MEET_LATE_DIALOGUE: Record<string, DialogueNode> = {
+  start: {
+    speaker: K,
+    text: 'Allillanchu! Hello, traveller. My name is Killa. Welcome to Machu Picchu, in the time of the Inca.',
+    choices: [], next: 'way',
+  },
+  ...DIRECTIONS,
+};
+
+/** Later conversations, before the puzzle is solved. */
+export const REPEAT_DIALOGUE: Record<string, DialogueNode> = {
+  start: {
+    speaker: K,
+    text: 'Hello again, traveller. How can I help you?',
+    choices: [
+      { text: 'Where should I go?', next: 'way2' },
       { text: 'Who are you?', next: 'who' },
       { text: 'What is this place?', next: 'place' },
-      { text: 'I heard something is hidden here…', next: 'mystery' },
+      { text: 'Goodbye.', next: null },
+    ],
+  },
+  way2: {
+    speaker: K,
+    text: 'Go down the great stairway through the terraces, following the gold. The carved doorway with the golden sun is at the bottom, on the right.',
+    choices: [
+      { text: 'What are the turning stones?', next: 'mystery' },
+      { text: 'Thank you.', next: null },
     ],
   },
   who: {
-    speaker: 'Killa',
-    text: 'I am Killa. My family tends these terraces: maize below, potatoes higher up where the air is cold. You look tired. And curious.',
+    speaker: K,
+    text: 'I am Killa. My family tends these terraces: maize below, potatoes higher up, where the air is cold.',
     choices: [
       { text: 'What is this place?', next: 'place' },
-      { text: 'Curious about what?', next: 'mystery' },
+      { text: 'Where should I go?', next: 'way2' },
+      { text: 'Goodbye.', next: null },
     ],
   },
   place: {
-    speaker: 'Killa',
+    speaker: K,
     text: 'This is the mountain estate of the Sapa Inca. The masons are still shaping stone for the temples. You can hear their hammers from dawn.',
     note: GENERAL_NOTES[0],
     choices: [
       { text: 'Who are you?', next: 'who' },
-      { text: 'Is anything hidden here?', next: 'mystery' },
+      { text: 'Where should I go?', next: 'way2' },
+      { text: 'Goodbye.', next: null },
     ],
   },
   mystery: {
-    speaker: 'Killa',
-    text: 'The elders tell a story. Only a story, perhaps. A chamber lies sealed beneath the terraces, closed by a stone that turns like the sky. They say the three worlds open the way: the condor above, the puma between, the serpent below.',
+    speaker: K,
+    text: 'The elders tell a story. A chamber lies sealed beneath the terraces, closed by stones that turn like the sky. The three worlds open the way: the condor above, the puma between, the serpent below.',
     choices: [
-      { text: 'Where should I look?', next: 'trail' },
       { text: 'Sounds like a legend.', next: 'legend' },
+      { text: 'Thank you, Killa.', next: null },
     ],
   },
   legend: {
-    speaker: 'Killa',
+    speaker: K,
     text: 'Legends are maps that lost their lines. But someone has been dropping gold on the terrace stairs. Odd, for a legend.',
-    choices: [{ text: 'Then I\'ll follow the gold.', next: null, effect: 'startGold' }],
-  },
-  trail: {
-    speaker: 'Killa',
-    text: 'Follow the glint of gold down the long stairway to the plaza. Where it ends, look for the turning stone. Remember: sky, earth, and the world below.',
-    choices: [{ text: 'Thank you, Killa.', next: null, effect: 'startGold' }],
-  },
-};
-
-export const REPEAT_DIALOGUE: Record<string, DialogueNode> = {
-  start: {
-    speaker: 'Killa',
-    text: 'Sky, earth, and the world below: condor, puma, serpent. The gold will lead you down the stairs.',
-    choices: [{ text: 'Goodbye.', next: null }],
+    choices: [{ text: 'Then I\'ll follow the gold.', next: null }],
   },
 };
 
 export const AFTER_DIALOGUE: Record<string, DialogueNode> = {
   start: {
-    speaker: 'Killa',
+    speaker: K,
     text: 'You opened it? Then the elders were right after all. The mountain has many more secrets. Walk freely, traveller.',
     choices: [{ text: 'Goodbye, Killa.', next: null }],
   },
 };
 
 export const CHECKPOINTS: Record<string, { x: number; z: number; heading: number; label: string }> = {
-  sungate: { x: 160, z: -249, heading: Math.atan2(128 - 160, -216 + 249), label: 'Sun Gate' },
+  sungate: { x: 159.57, z: -249.42, heading: Math.atan2(128 - 159.57, -216 + 249.42), label: 'Sun Gate' },
   guardhouse: { x: 2, z: -110, heading: 0, label: 'Guardhouse' },
   mechanism: { x: 14, z: -35.5, heading: Math.PI, label: 'Plaza' },
   chamber: { x: 14, z: -41, heading: Math.PI, label: 'Hidden Chamber' },

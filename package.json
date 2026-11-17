@@ -10,7 +10,9 @@
     "preview": "vite preview --host",
     "smoke": "node scripts/smoke-test.mjs",
     "touchtest": "node scripts/touch-test.mjs",
-    "advtest": "node scripts/adventure-test.mjs"
+    "advtest": "node scripts/adventure-test.mjs",
+    "dtest": "node scripts/milestone-d-test.mjs",
+    "perfprobe": "node scripts/perf-probe.mjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

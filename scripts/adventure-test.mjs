@@ -1,4 +1,5 @@
-// End-to-end test of the Milestone C adventure (desktop keyboard + phone touch).
+// End-to-end test of the Machu Picchu adventure (desktop keyboard + phone touch).
+// Milestone D: the transformation now follows Killa's welcome just beyond the Sun Gate.
 // Usage: node scripts/adventure-test.mjs [url]
 import { chromium } from 'playwright-core';
 import { existsSync, readdirSync, mkdirSync } from 'node:fs';
@@ -52,16 +53,27 @@ const frames = (page, n = 3) => page.evaluate((n) => new Promise((r) => { let i 
   const p0 = await page.evaluate(() => ({ x: window.__ltwe.player.pos.x, z: window.__ltwe.player.pos.z }));
   check('fresh: starts at the Sun Gate', Math.hypot(p0.x - 160, p0.z + 249) < 2, JSON.stringify(p0));
 
-  // 1. transformation plays to completion at the overlook (no skip)
-  await tp(page, 104, -197, 0);
+  // 1. meet Killa beyond the Sun Gate; her welcome leads into the transformation (no skip)
+  const k0 = s.killa;
+  await tp(page, k0.x + 3.5, k0.z - 3.5, -Math.PI * 0.75);
+  await waitFor(page, () => !document.getElementById('dialogue').hidden, null, 120000);
+  for (let i = 0; i < 3 && (await S(page)).modal === 'dialogue'; i++) {
+    await page.click('#dlg-choices .choice >> nth=0');
+    await page.waitForTimeout(200);
+  }
   await waitFor(page, () => window.__ltwe.adventure.modal === 'cinematic');
-  check('transformation triggers at overlook', true);
+  check('transformation triggers after Killa\'s welcome', true);
   check('skip button visible during cinematic', await page.isVisible('#era-skip'));
   await waitFor(page, () => window.__ltwe.adventure.debugState().cine > 1.7, null, 120000);
   await page.screenshot({ path: 'test-output/adv-1-transform-mid.png' });
-  await waitFor(page, () => window.__ltwe.adventure.debugState().cine < 0, null, 180000);
+  await waitFor(page, () => window.__ltwe.adventure.debugState().cine < 0, null, 240000);
   s = await S(page);
-  check('transformation completes: era 1, flag saved, objective meet', s.eraK === 1 && s.flags.transformed && s.objective === 'meet');
+  check('transformation completes: era 1, flag saved, conversation resumes', s.eraK === 1 && s.flags.transformed && s.modal === 'dialogue' && s.node === 'living');
+  // Killa's directions, then the conversation ends
+  for (let i = 0; i < 4 && (await S(page)).modal === 'dialogue'; i++) {
+    await page.click('#dlg-choices .choice >> nth=0');
+    await page.waitForTimeout(200);
+  }
   check('roofs/crops shown, rubble hidden', await page.evaluate(() => {
     const sc = window.__ltwe.player; void sc;
     const scene = window.__ltwe.adventure.killa.root.getScene();
@@ -71,24 +83,28 @@ const frames = (page, n = 3) => page.evaluate((n) => new Promise((r) => { let i 
   await page.waitForTimeout(600);
   await page.screenshot({ path: 'test-output/adv-2-living-city.png' });
 
-  // 2. Killa approaches and talks
+  s = await S(page);
+  check('intro dialogue saved; objective gold', s.flags.introDialogue && s.objective === 'gold' && s.modal === 'none');
+
+  // 2. Killa goes ahead to the guardhouse and can be talked to again
   await tp(page, 1, -109, Math.PI);
+  // Killa has gone ahead to the guardhouse; step up to her
+  await waitFor(page, () => Math.hypot(window.__ltwe.adventure.debugState().killa.x - 5, window.__ltwe.adventure.debugState().killa.z + 116) < 1, null, 60000);
+  await tp(page, 3.4, -114.2, 2.4);
   await waitFor(page, () => window.__ltwe.adventure.debugState().interaction === 'Talk to Killa', null, 120000);
   s = await S(page);
-  check('Killa approaches the explorer', Math.hypot(s.killa.x - 5, s.killa.z + 116) > 0.5 && s.killa.enabled, JSON.stringify(s.killa));
+  check('Killa waits at the guardhouse', Math.hypot(s.killa.x - 5, s.killa.z + 116) < 3 && s.killa.enabled, JSON.stringify(s.killa));
   check('desktop prompt shows E key', (await page.textContent('#prompt')).includes('Talk to Killa'));
   await page.screenshot({ path: 'test-output/adv-3-killa.png' });
   await page.keyboard.press('KeyE');
   await waitFor(page, () => !document.getElementById('dialogue').hidden);
-  check('dialogue opens with subtitles + 3 choices', (await page.textContent('#dlg-text')).includes('Welcome') && (await page.$$('#dlg-choices .choice')).length === 3);
+  check('dialogue opens with subtitles + 4 choices', (await page.textContent('#dlg-text')).includes('Hello again') && (await page.$$('#dlg-choices .choice')).length === 4);
   await page.screenshot({ path: 'test-output/adv-4-dialogue.png' });
-  await page.keyboard.press('3'); // hidden...
+  await page.keyboard.press('1'); // where should I go?
+  await page.keyboard.press('1'); // what are the turning stones?
   check('choice leads to the mystery', (await page.textContent('#dlg-text')).includes('three worlds'));
-  await page.click('#dlg-choices .choice >> nth=0'); // where should I look
-  await page.click('#dlg-choices .choice >> nth=0'); // thank you
+  await page.click('#dlg-choices .choice >> nth=1'); // thank you
   await waitFor(page, () => document.getElementById('dialogue').hidden);
-  s = await S(page);
-  check('intro dialogue saved; objective gold', s.flags.introDialogue && s.objective === 'gold');
 
   // 3. gold coins
   const coins = await page.evaluate(() => window.__ltwe.adventure.coins.map((c) => ({ id: c.id, x: c.x, z: c.z })));
@@ -200,7 +216,10 @@ const frames = (page, n = 3) => page.evaluate((n) => new Promise((r) => { let i 
   await boot(page, true);
   await page.tap('#start-btn');
   await page.waitForTimeout(800);
-  await tp(page, 104, -197, 0);
+  const km = (await S(page)).killa;
+  await tp(page, km.x + 3.5, km.z - 3.5, -Math.PI * 0.75);
+  await waitFor(page, () => !document.getElementById('dialogue').hidden, null, 120000);
+  await page.tap('#dlg-skip');
   await waitFor(page, () => window.__ltwe.adventure.modal === 'cinematic');
   check('phone: joystick hidden during cinematic', !(await page.isVisible('#joystick-zone')));
   await page.tap('#era-skip');
@@ -209,16 +228,18 @@ const frames = (page, n = 3) => page.evaluate((n) => new Promise((r) => { let i 
   check('phone: joystick back after cinematic', await page.isVisible('#joystick-zone'));
 
   await tp(page, 1, -109, Math.PI);
+  // Killa has gone ahead to the guardhouse; step up to her
+  await waitFor(page, () => Math.hypot(window.__ltwe.adventure.debugState().killa.x - 5, window.__ltwe.adventure.debugState().killa.z + 116) < 1, null, 60000);
+  await tp(page, 3.4, -114.2, 2.4);
   await page.waitForSelector('#btn-action:not([hidden])', { timeout: 120000 });
   check('phone: TALK button appears near Killa', (await page.textContent('#btn-action')) === 'TALK');
   await page.tap('#btn-action');
   await waitFor(page, () => !document.getElementById('dialogue').hidden);
   await page.screenshot({ path: 'test-output/adv-m1-dialogue.png' });
-  await page.tap('#dlg-choices .choice >> nth=2');
-  await page.tap('#dlg-choices .choice >> nth=1'); // legend
-  await page.tap('#dlg-choices .choice >> nth=0');
+  await page.tap('#dlg-choices .choice >> nth=1'); // who are you?
+  await page.tap('#dlg-choices .choice >> nth=2'); // goodbye
   await waitFor(page, () => document.getElementById('dialogue').hidden);
-  check('phone: dialogue by touch completes', (await S(page)).flags.introDialogue);
+  check('phone: dialogue by touch completes', (await S(page)).flags.introDialogue && (await S(page)).modal === 'none');
 
   await tp(page, 14, -37.3, Math.PI);
   await page.waitForSelector('#btn-action:not([hidden])', { timeout: 60000 });

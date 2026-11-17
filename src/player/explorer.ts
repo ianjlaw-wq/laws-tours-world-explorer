@@ -221,6 +221,49 @@ export class Explorer {
     [this.armR, this.elbowR] = arm('armR', 1);
     [this.legL, this.kneeL, this.ankleL] = leg('legL', -1);
     [this.legR, this.kneeR, this.ankleR] = leg('legR', 1);
+    this.mergeParts();
+  }
+
+  /**
+   * Performance: merge the primitives that share a joint and a material into one mesh each.
+   * The animated hierarchy is unchanged; draw calls (and shadow-pass draws) drop by more than half.
+   */
+  private mergeParts() {
+    const groups = new Map<string, Mesh[]>();
+    for (const m of this.meshes) {
+      const key = `${m.parent!.uniqueId}:${m.material!.uniqueId}`;
+      let g = groups.get(key);
+      if (!g) groups.set(key, (g = []));
+      g.push(m);
+    }
+    const out: Mesh[] = [];
+    for (const list of groups.values()) {
+      if (list.length === 1) { out.push(list[0]); continue; }
+      const parent = list[0].parent as TransformNode;
+      const mat = list[0].material;
+      // unparented, each primitive's local transform becomes its world transform, which
+      // MergeMeshes bakes into the vertices: the merged mesh lives in the joint's local space
+      for (const m of list) m.parent = null;
+      const merged = Mesh.MergeMeshes(list, true, true);
+      if (!merged) { for (const m of list) { m.parent = parent; out.push(m); } continue; }
+      merged.name = `${this.root.name}-${parent.name}`;
+      merged.parent = parent;
+      merged.material = mat;
+      merged.isPickable = false;
+      out.push(merged);
+    }
+    this.meshes.length = 0;
+    this.meshes.push(...out);
+  }
+
+  /** 0..1: wave the right arm (greeting). */
+  wave = 0;
+  /** 0..1: conversational hand gestures. */
+  talk = 0;
+  private curDt = 0;
+
+  private set(n: TransformNode, axis: 'x' | 'y' | 'z', v: number, rate = 18) {
+    n.rotation[axis] = damp(n.rotation[axis], v, rate, this.curDt);
   }
 
   /**
@@ -252,27 +295,25 @@ export class Explorer {
     this.wasGrounded = grounded;
     this.landing = damp(this.landing, 0, 7, dt);
 
-    const set = (n: TransformNode, axis: 'x' | 'y' | 'z', v: number, rate = 18) => {
-      n.rotation[axis] = damp(n.rotation[axis], v, rate, dt);
-    };
+    this.curDt = dt;
 
     if (grounded) {
       const legAmp = (0.42 + 0.38 * rb) * mv;
       const armAmp = (0.32 + 0.55 * rb) * mv;
-      set(this.legL, 'x', -sw * legAmp - 0.04 * rb);
-      set(this.legR, 'x', sw * legAmp - 0.04 * rb);
+      this.set(this.legL, 'x', -sw * legAmp - 0.04 * rb);
+      this.set(this.legR, 'x', sw * legAmp - 0.04 * rb);
       // knee bends during swing (leg moving forward)
-      set(this.kneeL, 'x', (Math.max(0, cw) * (0.55 + 0.75 * rb) + 0.06) * mv + this.landing * 0.5);
-      set(this.kneeR, 'x', (Math.max(0, -cw) * (0.55 + 0.75 * rb) + 0.06) * mv + this.landing * 0.5);
+      this.set(this.kneeL, 'x', (Math.max(0, cw) * (0.55 + 0.75 * rb) + 0.06) * mv + this.landing * 0.5);
+      this.set(this.kneeR, 'x', (Math.max(0, -cw) * (0.55 + 0.75 * rb) + 0.06) * mv + this.landing * 0.5);
       // heel strike / toe off
-      set(this.ankleL, 'x', (-sw * 0.25 - Math.max(0, cw) * 0.2) * mv);
-      set(this.ankleR, 'x', (sw * 0.25 - Math.max(0, -cw) * 0.2) * mv);
-      set(this.armL, 'x', sw * armAmp);
-      set(this.armR, 'x', -sw * armAmp);
-      set(this.armL, 'z', -0.1 - 0.05 * rb);
-      set(this.armR, 'z', 0.1 + 0.05 * rb);
-      set(this.elbowL, 'x', -(0.18 + rb * 1.0) * mv - 0.12 - Math.max(0, sw) * 0.25 * mv);
-      set(this.elbowR, 'x', -(0.18 + rb * 1.0) * mv - 0.12 - Math.max(0, -sw) * 0.25 * mv);
+      this.set(this.ankleL, 'x', (-sw * 0.25 - Math.max(0, cw) * 0.2) * mv);
+      this.set(this.ankleR, 'x', (sw * 0.25 - Math.max(0, -cw) * 0.2) * mv);
+      this.set(this.armL, 'x', sw * armAmp);
+      this.set(this.armR, 'x', -sw * armAmp);
+      this.set(this.armL, 'z', -0.1 - 0.05 * rb);
+      this.set(this.armR, 'z', 0.1 + 0.05 * rb);
+      this.set(this.elbowL, 'x', -(0.18 + rb * 1.0) * mv - 0.12 - Math.max(0, sw) * 0.25 * mv);
+      this.set(this.elbowR, 'x', -(0.18 + rb * 1.0) * mv - 0.12 - Math.max(0, -sw) * 0.25 * mv);
 
       const bob = Math.abs(cw) * (0.025 + 0.05 * rb) * mv;
       const idleT = 1 - mv;
@@ -280,14 +321,14 @@ export class Explorer {
       const shift = Math.sin(time * 0.45) * 0.02 * idleT; // weight shift when idle
       this.hips.position.y = damp(this.hips.position.y, 0.96 - 0.03 * rb + bob + breathe - this.landing * 0.14, 20, dt);
       this.hips.position.x = damp(this.hips.position.x, shift, 4, dt);
-      set(this.hips, 'z', sw * 0.05 * mv * (1 - rb * 0.5) - shift * 1.5);
-      set(this.hips, 'y', sw * 0.12 * mv);
-      set(this.torso, 'x', 0.03 + rb * 0.2 + this.landing * 0.25);
-      set(this.chest, 'y', -sw * (0.14 + 0.08 * rb) * mv); // shoulders counter-rotate
-      set(this.chest, 'x', breathe * 2);
+      this.set(this.hips, 'z', sw * 0.05 * mv * (1 - rb * 0.5) - shift * 1.5);
+      this.set(this.hips, 'y', sw * 0.12 * mv);
+      this.set(this.torso, 'x', 0.03 + rb * 0.2 + this.landing * 0.25);
+      this.set(this.chest, 'y', -sw * (0.14 + 0.08 * rb) * mv); // shoulders counter-rotate
+      this.set(this.chest, 'x', breathe * 2);
       // head stays level-ish and occasionally looks around when idle
-      set(this.head, 'y', sw * 0.1 * mv + Math.sin(time * 0.3) * 0.35 * idleT * Math.max(0, Math.sin(time * 0.13)), 4);
-      set(this.head, 'x', -rb * 0.12 - this.landing * 0.1);
+      this.set(this.head, 'y', sw * 0.1 * mv + Math.sin(time * 0.3) * 0.35 * idleT * Math.max(0, Math.sin(time * 0.13)), 4);
+      this.set(this.head, 'x', -rb * 0.12 - this.landing * 0.1);
 
       const sign = Math.sign(sw);
       if (mv > 0.25 && sign !== this.lastStepSign) {
@@ -297,20 +338,34 @@ export class Explorer {
     } else {
       // airborne: tuck legs on the way up, reach down on the way down
       const up = vy > 0 ? 1 : 0.4;
-      set(this.legL, 'x', -0.55 * up - 0.1, 12);
-      set(this.legR, 'x', 0.2, 12);
-      set(this.kneeL, 'x', 0.95 * up + 0.2, 12);
-      set(this.kneeR, 'x', 0.5, 12);
-      set(this.ankleL, 'x', 0.2, 12);
-      set(this.ankleR, 'x', 0.3, 12);
-      set(this.armL, 'x', -0.5, 10);
-      set(this.armR, 'x', -0.35, 10);
-      set(this.armL, 'z', -0.45, 10);
-      set(this.armR, 'z', 0.45, 10);
-      set(this.elbowL, 'x', -0.6, 10);
-      set(this.elbowR, 'x', -0.6, 10);
-      set(this.torso, 'x', 0.12, 10);
+      this.set(this.legL, 'x', -0.55 * up - 0.1, 12);
+      this.set(this.legR, 'x', 0.2, 12);
+      this.set(this.kneeL, 'x', 0.95 * up + 0.2, 12);
+      this.set(this.kneeR, 'x', 0.5, 12);
+      this.set(this.ankleL, 'x', 0.2, 12);
+      this.set(this.ankleR, 'x', 0.3, 12);
+      this.set(this.armL, 'x', -0.5, 10);
+      this.set(this.armR, 'x', -0.35, 10);
+      this.set(this.armL, 'z', -0.45, 10);
+      this.set(this.armR, 'z', 0.45, 10);
+      this.set(this.elbowL, 'x', -0.6, 10);
+      this.set(this.elbowR, 'x', -0.6, 10);
+      this.set(this.torso, 'x', 0.12, 10);
       this.hips.position.y = damp(this.hips.position.y, 0.96, 12, dt);
+    }
+    if (grounded && (this.wave > 0.01 || this.talk > 0.01)) {
+      const w = this.wave;
+      const t = this.talk * (1 - w);
+      // greeting wave: right arm raised, forearm swinging
+      this.set(this.armR, 'x', -2.5 * w - 0.45 * t - Math.max(0, Math.sin(time * 1.3)) * 0.2 * t, 10);
+      this.set(this.armR, 'z', 0.35 * w + 0.12, 10);
+      this.set(this.elbowR, 'x', -0.35 * w - (0.9 + Math.sin(time * 2.6) * 0.25) * t, 10);
+      this.set(this.armR, 'y', Math.sin(time * 7) * 0.5 * w, 12);
+      // the other hand joins in now and then while talking
+      this.set(this.elbowL, 'x', -0.12 - (0.5 + Math.sin(time * 1.9 + 1) * 0.3) * t * Math.max(0, Math.sin(time * 0.7)), 8);
+      this.set(this.head, 'x', Math.sin(time * 2.2) * 0.05 * t, 6);
+    } else {
+      this.set(this.armR, 'y', 0, 10);
     }
     this.body.rotation.z = this.bank;
   }

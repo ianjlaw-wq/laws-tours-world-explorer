@@ -24,8 +24,11 @@ export const TRAIL: Vec3[] = [
 export const TRAIL_HALF_WIDTH = 1.8;
 
 export const SUN_GATE = { x: 150, z: -239, y: 74 };
-/** Player start: just behind the Sun Gate, looking down towards the city. */
-export const PLAYER_START = { x: 160, z: -249, y: 76 };
+/**
+ * Player start: just behind the Sun Gate, looking down towards the city. Slightly left of the
+ * trail's centre line so that Killa, waiting beyond the gate, is not hidden behind the explorer.
+ */
+export const PLAYER_START = { x: 159.57, z: -249.42, y: 76 };
 
 // ---- Site levels ----
 export const PLAZA_Y = 0;
@@ -106,6 +109,7 @@ export const ZONES: Zone[] = [
   { name: 'Main Plaza', x: 0, z: 12, r: 26 },
   { name: 'Eastern Residential Sector', x: 36, z: 25, r: 26 },
   { name: 'The Hidden Chamber', x: 14, z: -47.5, r: 3.2 },
+  { name: 'The Carved Doorway', x: 14, z: -40, r: 8 },
   { name: 'Agricultural Terraces', x: -2, z: -75, r: 40 },
   { name: 'The Inca Trail', x: 80, z: -175, r: 120 },
 ];

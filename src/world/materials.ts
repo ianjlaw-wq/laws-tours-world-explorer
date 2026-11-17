@@ -161,3 +161,21 @@ export function foliageMaterial(scene: Scene, name: string, texture: Texture, sw
   `);
   return m;
 }
+
+/** Opaque, vertex-coloured crop geometry (maize, potatoes): two-sided, gentle height-weighted sway. */
+export function cropMaterial(scene: Scene, name: string, sway: number): CustomMaterial {
+  const m = new CustomMaterial(name, scene);
+  m.diffuseColor = new Color3(1, 1, 1);
+  m.backFaceCulling = false;
+  m.twoSidedLighting = true;
+  m.specularColor = new Color3(0.04, 0.05, 0.03);
+  m.specularPower = 12;
+  addTime(m);
+  m.Vertex_After_WorldPosComputed(`
+    float h = max(0.0, position.y);
+    float ph = worldPos.x * 0.21 + worldPos.z * 0.17;
+    worldPos.x += sin(uTime * 1.5 + ph) * ${sway.toFixed(3)} * h * h;
+    worldPos.z += cos(uTime * 1.2 + ph * 1.3) * ${(sway * 0.7).toFixed(3)} * h * h;
+  `);
+  return m;
+}

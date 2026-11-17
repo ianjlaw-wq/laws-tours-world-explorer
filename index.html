@@ -37,8 +37,13 @@
       <div id="top-right">
         <div id="gold" aria-label="Gold collected"><span class="coin-icon"></span><span id="gold-count">0</span></div>
         <button id="btn-journal" class="hud-btn" aria-label="Explorer's Journal">📖</button>
-        <button id="btn-sound" class="hud-btn" aria-label="Toggle sound">🔊</button>
-        <button id="btn-help" class="hud-btn" aria-label="Controls help">?</button>
+        <button id="btn-cc" class="hud-btn cc" aria-label="Subtitles" aria-pressed="false">CC</button>
+        <button id="btn-voice" class="hud-btn" aria-label="Killa's voice" aria-pressed="true">🔊</button>
+        <button id="btn-settings" class="hud-btn" aria-label="Settings and pause">⚙</button>
+      </div>
+      <div id="nav" hidden>
+        <svg id="nav-arrow" viewBox="0 0 40 40" aria-hidden="true"><path d="M20 3 L34 33 L20 25 L6 33 Z" /></svg>
+        <span id="nav-label"></span>
       </div>
       <div id="fps"></div>
       <div id="objective"></div>
@@ -54,17 +59,21 @@
     </div>
 
     <!-- Transformation cinematic -->
-    <div id="era-flash"></div>
     <div id="era-title" hidden>
-      <div class="era-year">c. 1450</div>
-      <div class="era-name">Machu Picchu comes to life</div>
-      <div class="era-note">An artistic impression of the inhabited Inca estate</div>
+      <div id="era-year" class="era-year">Today</div>
+      <div id="era-name" class="era-name">The ruins of Machu Picchu</div>
+      <div class="era-note">An artistic impression, not a survey-accurate reconstruction</div>
     </div>
     <button id="era-skip" hidden>Skip ▸▸</button>
 
     <!-- Dialogue -->
     <div id="dialogue" class="panel" hidden>
-      <div id="dlg-speaker"></div>
+      <div class="dlg-head">
+        <span id="dlg-speaker"></span>
+        <span id="dlg-speaking" hidden><i></i><i></i><i></i> speaking</span>
+        <button id="dlg-play" class="voice-play" hidden>▶ Play voice</button>
+        <button id="dlg-skip" class="link-btn" hidden>Skip intro ▸▸</button>
+      </div>
       <div id="dlg-text"></div>
       <div id="dlg-note" hidden></div>
       <div id="dlg-choices"></div>
@@ -90,6 +99,21 @@
       </div>
     </div>
 
+    <!-- Settings / pause -->
+    <div id="settings" hidden>
+      <div class="settings-box">
+        <h2>Paused</h2>
+        <div class="set-row"><span>🔊 Killa's voice</span><button id="set-voice" class="set-btn">On</button></div>
+        <div class="set-row"><span>CC Subtitles</span><button id="set-subs" class="set-btn">Off</button></div>
+        <div class="set-row"><span>🎵 Sound &amp; ambience</span><button id="set-sound" class="set-btn">On</button></div>
+        <p id="set-voice-name" class="set-note"></p>
+        <div class="set-actions">
+          <button id="set-help" class="set-btn">Controls</button>
+          <button id="settings-close" class="set-btn primary">Resume</button>
+        </div>
+      </div>
+    </div>
+
     <div id="help" hidden>
       <h2>Controls</h2>
       <div class="help-cols">
@@ -98,7 +122,7 @@
           <p>Left thumb: joystick to walk. Push it further to run.</p>
           <p>Right side: swipe to look around. Pinch to zoom.</p>
           <p>JUMP button to jump. TALK / EXAMINE button to interact.</p>
-          <p>📖 opens the Explorer's Journal.</p>
+          <p>📖 opens the Explorer's Journal. CC = subtitles, 🔊 = Killa's voice, ⚙ = pause.</p>
         </div>
         <div>
           <h3>Keyboard &amp; mouse</h3>

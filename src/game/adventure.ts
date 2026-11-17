@@ -1,6 +1,7 @@
-// Milestone C: the first playable Machu Picchu adventure.
-// Transformation to c.1450, the villager Killa, a gold-coin trail, the turning-stone puzzle,
-// the hidden chamber, the Explorer's Journal and automatic local saving.
+// The Machu Picchu adventure (Milestones C + D).
+// Opening: Sun Gate -> Killa waits just beyond it -> spoken welcome -> cinematic transformation of the
+// ruins into the living Inca city -> Killa's directions -> the carved doorway and the turning-stone
+// puzzle -> the hidden chamber. Also: gold coins, the Explorer's Journal and automatic local saving.
 
 import { Scene } from '@babylonjs/core/scene';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
@@ -17,27 +18,38 @@ import type { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight';
 
 import { Explorer } from '../player/explorer';
 import type { PlayerController } from '../player/controller';
-import type { FollowCamera } from '../camera';
+import { CamPose, FollowCamera, lerpPose, newPose } from '../camera';
 import type { Input } from '../input';
 import type { Ambience } from '../audio';
 import type { Environment } from '../world/environment';
 import type { SiteResult } from '../world/site';
+import { COURSE_H } from '../world/site';
 import type { Box, CollisionWorld } from '../world/colliders';
-import { AG, CHAMBER, MECHANISM, OVERLOOK, VILLAGER_HOME, ZONES } from '../world/layout';
+import { Villagers } from '../world/villagers';
+import { AG, AG_Z_END, CHAMBER, MECHANISM, PLAYER_START, SUN_GATE, TRAIL, VILLAGER_HOME, ZONES } from '../world/layout';
 import { cloudTexture } from '../world/textures';
 import { SaveData, clearSave, freshSave, loadSave, writeSave } from './save';
 import {
-  AFTER_DIALOGUE, CHECKPOINTS, DialogueNode, GENERAL_NOTES, INTRO_DIALOGUE, LANDMARK_NOTES, Note, OBJECTIVES, REPEAT_DIALOGUE,
+  AFTER_DIALOGUE, CHECKPOINTS, DialogueNode, GENERAL_NOTES, LANDMARK_NOTES, MEET_DIALOGUE, MEET_LATE_DIALOGUE, Note, OBJECTIVES, REPEAT_DIALOGUE,
 } from './story';
 import { GLYPHS, GLYPH_NAMES, drawGlyph, glyphCanvas, paintGlyphCanvas } from './glyphs';
+import { DialogueVoice } from './voice';
+import { Prefs, loadPrefs, savePrefs } from './prefs';
+import { NavIndicator, P2, Polyline } from './nav';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 const smooth = (x: number) => { const t = clamp01(x); return t * t * (3 - 2 * t); };
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+const wrapA = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 
-export const TRANSFORM_SECONDS = 4.2;
-const CITY = { x: 0, z: -60 };
+/** Length of the transformation cinematic (seconds). */
+export const TRANSFORM_SECONDS = 7.6;
+// cinematic timeline
+const T_SWOOP = 1.5; // camera reaches the elevated view
+const T_ERA0 = 1.9; // ruins start to change
+const T_ERA1 = 5.6; // city fully alive
+const T_RETURN = 6.0; // camera starts returning to the explorer
 const COIN_VALUE = 10;
 const RELIC_VALUE = 50;
 export const PUZZLE_ID = 'mp-turning-stones';
@@ -46,8 +58,32 @@ const START_WHEELS = [3, 0, 1];
 const MECH_FRONT = { x: MECHANISM.x, z: MECHANISM.z + 1.35 };
 const RELIC_SPOT = { x: CHAMBER.door.x, z: CHAMBER.zBack + 0.7 + 0.6 };
 const WHEEL_LABELS = ['Upper wheel', 'Middle wheel', 'Lower wheel'];
+const DOORWAY_ZONE = 'The Carved Doorway';
 
-type Modal = 'none' | 'cinematic' | 'dialogue' | 'puzzle' | 'journal';
+/**
+ * Killa's first-meeting spot: on the trail beyond the Sun Gate, a little to the right of the
+ * path so the explorer (in the middle of the screen) never hides her.
+ */
+const GATE_SPOT = (() => {
+  const dx = TRAIL[2].x - SUN_GATE.x;
+  const dz = TRAIL[2].z - SUN_GATE.z;
+  const L = Math.hypot(dx, dz);
+  const ux = dx / L, uz = dz / L;
+  return { x: SUN_GATE.x + ux * 8 + uz * 0.8, z: SUN_GATE.z + uz * 8 - ux * 0.8 };
+})();
+/** Elevated view over the city used by the transformation cinematic. */
+const CITY_VIEW = { target: new Vector3(0, 4, -20), alpha: Math.atan2(-0.819, 0.574), beta: 1.0, radius: 104 };
+/** Walking route from the Sun Gate to the turning stones (for the objective arrow). */
+const ROUTE: P2[] = [
+  ...TRAIL.slice(1).map((p) => [p.x, p.z] as P2),
+  [AG.stairX, AG_Z_END + 1.5],
+  [AG.stairX, AG.zStart + 1.6],
+  [8, MECHANISM.z + 0.6],
+  [MECH_FRONT.x, MECH_FRONT.z],
+];
+const TRAIL_LINE = new Polyline(TRAIL.map((p) => [p.x, p.z] as P2));
+
+type Modal = 'none' | 'cinematic' | 'dialogue' | 'puzzle' | 'journal' | 'settings';
 interface Interaction { label: string; text: string; act: () => void }
 
 export interface AdventureDeps {
@@ -68,24 +104,46 @@ export class Adventure {
   /** true when a save existed at boot */
   readonly resumed: boolean;
   modal: Modal = 'none';
+  readonly voice = new DialogueVoice();
+  readonly prefs: Prefs = loadPrefs();
   private d: AdventureDeps;
   private eraK = 0;
-  private cine = -1;
-  private base: { sunDiff: Color3; sunInt: number; hemiInt: number; hemiDiff: Color3; fog: Color3; fogDen: number; exposure: number };
+  private base: { sunDiff: Color3; sunInt: number; hemiInt: number; hemiDiff: Color3; fog: Color3; fogDen: number; exposure: number; contrast: number };
   private hemi: HemisphericLight | null;
   private smoke: ParticleSystem;
   private sparkle: ParticleSystem;
-  // villager
+  private villagers: Villagers;
+  // ---- cinematic ----
+  private cine = -1;
+  private cineReplay = false;
+  /** dialogue node to continue with after the cinematic */
+  private cineResume: string | null = null;
+  private poseFrom = newPose();
+  private poseTo = newPose();
+  private poseCity = newPose();
+  private poseOut = newPose();
+  private camMode: 'none' | 'frame' | 'cine' | 'release' = 'none';
+  private camT = 0;
+  private frameSide = 1;
+  /** shadow-map focus while the camera is away from the explorer */
+  shadowFocus: Vector3 | null = null;
+  // ---- villager Killa ----
   readonly killa: Explorer;
   private killaPos = new Vector3();
+  private killaHome = new Vector3();
+  private killaHomeHeading = 0;
   private killaHeading = 0;
   private killaSpeed = 0;
-  private greeted = false;
-  // coins
+  private meeting: 'none' | 'approach' | 'talk' = 'none';
+  private meetT = 0;
+  private bubble: Mesh;
+  private relocateToGuardhouse = false;
+  private started = false;
+  // ---- coins ----
   readonly coins: Array<{ id: string; x: number; y: number; z: number; taken: boolean; anim: number }> = [];
   private coinMesh: Mesh;
   private coinMatrices: Float32Array;
-  // puzzle
+  // ---- puzzle & doorway ----
   private wheels = [...START_WHEELS];
   private wheelNodes: TransformNode[] = [];
   private wheelAngles = [0, 0, 0];
@@ -96,13 +154,21 @@ export class Adventure {
   private doorBaseY = 0;
   private relic: TransformNode;
   private puzzleSolvedAnim = -1;
-  // ui
+  private beacon: Mesh;
+  private marker: Mesh;
+  private flames: Mesh[] = [];
+  private banners: Mesh[] = [];
+  private navWasOn = false;
+  readonly nav = new NavIndicator(new Polyline(ROUTE), 'Carved doorway');
+  // ---- ui ----
   private interaction: Interaction | null = null;
   private saveTimer = 0;
-  private dialogueTree: Record<string, DialogueNode> = INTRO_DIALOGUE;
+  private dialogueTree: Record<string, DialogueNode> = MEET_DIALOGUE;
+  private nodeId = '';
   private choiceHandlers: Array<() => void> = [];
+  private advanceTimer = 0;
   private wheelCanvases: HTMLCanvasElement[] = [];
-  private cineEls = { flash: $('era-flash'), title: $('era-title'), skip: $('era-skip') };
+  private cineEls = { title: $('era-title'), year: $('era-year'), name: $('era-name'), skip: $('era-skip') };
 
   constructor(d: AdventureDeps) {
     this.d = d;
@@ -121,29 +187,46 @@ export class Adventure {
       fog: scene.fogColor.clone(),
       fogDen: scene.fogDensity,
       exposure: scene.imageProcessingConfiguration.exposure,
+      contrast: scene.imageProcessingConfiguration.contrast,
     };
 
     this.smoke = this.buildSmoke();
     this.sparkle = this.buildSparkle();
+    this.villagers = new Villagers(scene, d.world);
+
+    // ---- Killa ----
     this.killa = new Explorer(scene, { villager: true, name: 'killa' });
+    this.killa.root.scaling.setAll(0.95); // a little shorter than the explorer: distinct silhouettes
     for (const m of this.killa.meshes) m.receiveShadows = false;
     if (env.shadows) for (const m of this.killa.meshes) env.shadows.addShadowCaster(m, false);
-    this.killaPos.set(VILLAGER_HOME.x, this.ground(VILLAGER_HOME.x, VILLAGER_HOME.z, VILLAGER_HOME.y + 2), VILLAGER_HOME.z);
-    this.killaHeading = Math.atan2(0 - VILLAGER_HOME.x, -112 - VILLAGER_HOME.z);
-    this.killa.root.setEnabled(false);
+    this.bubble = this.buildBubble();
+    this.bubble.scaling.setAll(1.4);
+    this.placeKilla();
 
     this.coinMesh = this.buildCoins();
     this.coinMatrices = new Float32Array(this.coins.length * 16);
+    this.coinMesh.thinInstanceSetBuffer('matrix', this.coinMatrices, 16, false);
     this.wheelMat = this.buildMechanism();
     this.door = this.buildDoor();
     this.relic = this.buildRelic();
+    const deco = this.buildDoorway();
+    this.beacon = deco.beacon;
+    this.marker = deco.marker;
+
+    // the era layers are animated by the transformation
+    d.site.rubble.unfreezeWorldMatrix();
+    d.site.era.soil.unfreezeWorldMatrix();
 
     // ---- restore persisted state ----
-    if (this.save.flags.transformed) this.applyEra(1, true);
+    this.applyEra(this.save.flags.transformed ? 1 : 0);
     if (this.save.puzzles.includes(PUZZLE_ID)) this.setSolvedInstant();
     if (this.save.flags.treasure) this.relic.setEnabled(false);
 
+    this.voice.enabled = this.prefs.voice;
+    this.d.audio.setMuted(!this.prefs.sound);
+    this.voice.onStatus = () => this.refreshVoiceUi();
     this.wireUi();
+    this.refreshPrefsUi();
     this.refreshHud(false);
   }
 
@@ -159,13 +242,17 @@ export class Adventure {
   spawn(): { x: number; y: number; z: number; heading: number } | null {
     const p = this.save.pos;
     const w = this.d.world;
+    let out: { x: number; y: number; z: number; heading: number } | null = null;
     if (p && [p.x, p.y, p.z, p.heading].every(Number.isFinite)) {
       const g = w.groundAt(p.x, p.z, p.y + 0.6, 0.6).y;
-      if (Math.abs(g - p.y) < 1.0 && !w.solidAt(p.x, g + 1.0, p.z, 0.05)) return { x: p.x, y: g, z: p.z, heading: p.heading };
+      if (Math.abs(g - p.y) < 1.0 && !w.solidAt(p.x, g + 1.0, p.z, 0.05)) out = { x: p.x, y: g, z: p.z, heading: p.heading };
     }
-    if (!this.resumed) return null;
-    const c = CHECKPOINTS[this.save.checkpoint] ?? CHECKPOINTS.sungate;
-    return { x: c.x, y: w.groundAt(c.x, c.z, 1000, 2000).y, z: c.z, heading: c.heading };
+    if (!out && this.resumed) {
+      const c = CHECKPOINTS[this.save.checkpoint] ?? CHECKPOINTS.sungate;
+      out = { x: c.x, y: w.groundAt(c.x, c.z, 1000, 2000).y, z: c.z, heading: c.heading };
+    }
+    if (out) this.placeKilla(out.x, out.z);
+    return out;
   }
 
   /** Called when the player enters a named zone. */
@@ -173,6 +260,9 @@ export class Adventure {
     if (!name || this.save.discovered.includes(name)) return;
     this.save.discovered.push(name);
     this.toast(`📖 New journal entry: ${name}`);
+    if (name === DOORWAY_ZONE && !this.save.puzzles.includes(PUZZLE_ID)) {
+      this.setObjective('puzzle');
+    }
     if (name === 'The Hidden Chamber' && this.save.objective === 'chamber') {
       this.d.audio.chime();
     }
@@ -192,30 +282,38 @@ export class Adventure {
     writeSave(this.save);
   }
 
-  /**
-   * Per-frame update. `playing` = the game has started. Adds camera zoom during the cinematic.
-   */
-  update(dt: number, time: number, playing: boolean, look: { dx: number; dy: number; zoom: number }) {
+  /** Per-frame update. `playing` = the game has started. */
+  update(dt: number, time: number, playing: boolean, _look: { dx: number; dy: number; zoom: number }) {
     const { player, input } = this.d;
     if (!playing) return;
+    this.started = true;
 
-    this.updateCinematic(dt, look);
+    this.updateCinematic(dt);
     this.updateKilla(dt, time);
+    this.updateCamera(dt);
     this.updateCoins(dt, time);
     this.updateMechanism(dt, time);
+    this.updateDoorway(time);
+    this.villagers.update(dt, time);
+    this.updateDialogueTimer(dt);
 
-    // trigger the transformation at the overlook (or, as a fallback, on reaching the city)
-    if (!this.save.flags.transformed && this.cine < 0 && this.modal === 'none') {
-      const dO = Math.hypot(player.pos.x - OVERLOOK.x, player.pos.z - OVERLOOK.z);
-      const dC = Math.hypot(player.pos.x - CITY.x, player.pos.z - CITY.z);
-      if (dO < 10 || dC < 110) this.startTransformation();
+    // first meeting: Killa notices the explorer
+    if (!this.save.flags.introDialogue && this.meeting === 'none' && this.modal === 'none' && this.killa.root.isEnabled()) {
+      const d = Math.hypot(player.pos.x - this.killaPos.x, player.pos.z - this.killaPos.z);
+      if (d < 5.5 || this.passedKilla()) this.beginMeeting();
     }
 
-    // objective progression by proximity
+    // the doorway is discovered on approach (also handled by the zone banner)
     const dM = Math.hypot(player.pos.x - MECHANISM.x, player.pos.z - MECHANISM.z);
-    if ((this.save.objective === 'gold' || this.save.objective === 'meet') && dM < 7 && !this.save.puzzles.includes(PUZZLE_ID)) {
-      this.setObjective('puzzle');
-    }
+    if (dM < 8 && !this.save.discovered.includes(DOORWAY_ZONE)) this.discover(DOORWAY_ZONE);
+
+    // objective indicator and beacon (only once Killa has given directions, until the puzzle is solved)
+    const navOn = this.navActive();
+    if (navOn) this.nav.update(player.pos.x, player.pos.z, this.d.camera.yaw);
+    else this.nav.hide();
+    if (navOn !== this.navWasOn) { this.navWasOn = navOn; document.body.classList.toggle('nav-on', navOn); }
+    const s = this.save;
+    this.setObjectiveMarkers(s.flags.introDialogue && s.flags.transformed && !s.puzzles.includes(PUZZLE_ID) && this.cine < 0);
 
     // interactions
     const act = input.consumeKey('KeyE') || input.consumeKey('Action');
@@ -232,87 +330,260 @@ export class Adventure {
     }
   }
 
-  // =====================================================================
-  // Transformation
-  // =====================================================================
-
-  startTransformation() {
-    if (this.save.flags.transformed || this.cine >= 0) return;
-    this.cine = 0;
-    this.setModal('cinematic');
-    this.cineEls.title.hidden = false;
-    this.cineEls.skip.hidden = false;
-    this.d.audio.swell(TRANSFORM_SECONDS);
-    // turn the explorer to face the city and let the camera settle behind
-    const p = this.d.player;
-    this.cineHeading = Math.atan2(CITY.x - p.pos.x, CITY.z - p.pos.z);
+  /**
+   * Loading-screen warm-up: enable every layer that can appear later (living-city layers, coins,
+   * villagers, Killa, markers) so their shaders compile before play. Compiling them mid-game - as
+   * Milestone C did when the city first came to life - causes multi-frame hitches on phones.
+   */
+  setWarmup(on: boolean) {
+    if (on) {
+      this.applyEra(1);
+      this.coinMesh.setEnabled(true);
+      this.killa.root.setEnabled(true);
+      this.bubble.setEnabled(true);
+      this.beacon.setEnabled(true);
+      this.marker.setEnabled(true);
+    } else {
+      this.applyEra(this.save.flags.transformed ? 1 : 0);
+      this.coinMesh.setEnabled(this.eraK >= 1);
+      const s = this.save;
+      const markers = s.flags.introDialogue && s.flags.transformed && !s.puzzles.includes(PUZZLE_ID);
+      this.beacon.setEnabled(markers);
+      this.marker.setEnabled(markers);
+    }
   }
 
-  private cineHeading = 0;
+  private navActive() {
+    const s = this.save;
+    return this.modal === 'none' && s.flags.introDialogue && s.flags.transformed && !s.puzzles.includes(PUZZLE_ID);
+  }
 
-  /** Skip the cinematic (button, Esc, or test hook). */
+  // =====================================================================
+  // Camera direction (conversation framing, cinematic, hand-back)
+  // =====================================================================
+
+  /** Over-the-shoulder two-shot of the explorer and Killa. */
+  private framingPose(out: CamPose): CamPose {
+    const p = this.d.player.pos;
+    const k = this.killaPos;
+    let ux = k.x - p.x;
+    let uz = k.z - p.z;
+    const L = Math.hypot(ux, uz) || 1;
+    ux /= L; uz /= L;
+    const px = uz * this.frameSide;
+    const pz = -ux * this.frameSide;
+    const ox = px * 0.85 - ux * 0.5;
+    const oz = pz * 0.85 - uz * 0.5;
+    // aim a little below the faces so both characters sit above the dialogue panel
+    out.target.set((p.x + k.x) / 2, (p.y + k.y) / 2 + 0.75, (p.z + k.z) / 2);
+    out.alpha = Math.atan2(oz, ox);
+    out.beta = 1.36;
+    out.radius = this.clearBoom(out.target, out.alpha, out.beta, 3.9 + L * 0.7);
+    return out;
+  }
+
+  /** Longest camera distance (up to `r`) along a boom that does not pass through rock or walls. */
+  private clearBoom(t: Vector3, alpha: number, beta: number, r: number) {
+    const sb = Math.sin(beta);
+    const dx = Math.cos(alpha) * sb, dy = Math.cos(beta), dz = Math.sin(alpha) * sb;
+    for (let s = 0.8; s <= r; s += 0.25) {
+      if (this.d.world.solidAt(t.x + dx * s, t.y + dy * s, t.z + dz * s, 0.45)) return Math.max(1.4, s - 0.5);
+    }
+    return r;
+  }
+
+  /** Choose the side of the two-shot nearest the current camera, so the cut is gentle. */
+  private pickFrameSide() {
+    const cur = this.d.camera.cam.alpha;
+    this.frameSide = 1;
+    const a = this.framingPose(this.poseOut);
+    const aAlpha = a.alpha, aR = a.radius;
+    this.frameSide = -1;
+    const b = this.framingPose(this.poseOut);
+    // prefer an unobstructed view, then the side closest to the current camera
+    const scoreA = aR - Math.abs(wrapA(aAlpha - cur)) * 0.8;
+    const scoreB = b.radius - Math.abs(wrapA(b.alpha - cur)) * 0.8;
+    this.frameSide = scoreA >= scoreB ? 1 : -1;
+  }
+
+  private setCamMode(m: 'none' | 'frame' | 'cine' | 'release') {
+    this.d.camera.getPose(this.poseFrom);
+    this.camMode = m;
+    this.camT = 0;
+    this.d.camera.pose = m === 'none' ? null : this.poseOut;
+    if (m === 'none') this.shadowFocus = null;
+  }
+
+  private updateCamera(dt: number) {
+    if (this.camMode === 'none' || this.camMode === 'cine') return;
+    this.camT += dt;
+    const { camera, player } = this.d;
+    if (this.camMode === 'frame') {
+      lerpPose(this.poseFrom, this.framingPose(this.poseTo), smooth(this.camT / 1.0), this.poseOut);
+    } else {
+      lerpPose(this.poseFrom, camera.followPose(player.pos, player.heading, this.poseTo), smooth(this.camT / 0.8), this.poseOut);
+      if (this.camT >= 0.8) { camera.pose = null; this.camMode = 'none'; }
+    }
+  }
+
+  // =====================================================================
+  // Transformation cinematic: present-day ruins -> living Inca city (c. 1450)
+  // =====================================================================
+
+  /**
+   * Play the transformation. `resume` = dialogue node to continue with afterwards.
+   * `replay` = revisit from the Sun Gate (progress unaffected).
+   */
+  startTransformation(resume: string | null = null, replay = false) {
+    if (this.cine >= 0) return;
+    if (!replay && this.save.flags.transformed) return;
+    this.cine = 0;
+    this.cineReplay = replay;
+    this.cineResume = resume;
+    this.voice.stop();
+    $('dialogue').hidden = true;
+    this.setModal('cinematic');
+    this.applyEra(0);
+    this.cineEls.title.hidden = false;
+    this.cineEls.title.style.opacity = '0';
+    this.cineEls.skip.hidden = false;
+    this.d.audio.swell(T_ERA1 - T_ERA0 + 1);
+    this.d.camera.getPose(this.poseFrom);
+    this.camMode = 'cine';
+    this.d.camera.pose = this.poseOut;
+    this.poseCity.target.copyFrom(CITY_VIEW.target);
+    this.poseCity.alpha = CITY_VIEW.alpha;
+    this.poseCity.beta = CITY_VIEW.beta;
+    this.poseCity.radius = CITY_VIEW.radius;
+    this.shadowFocus = CITY_VIEW.target;
+  }
+
+  /** Skip the cinematic (button, Esc, or test hook): the city is left in its final state. */
   skipTransformation() {
     if (this.cine < 0) return;
     this.cine = TRANSFORM_SECONDS;
   }
 
-  private updateCinematic(dt: number, look: { dx: number; dy: number; zoom: number }) {
+  private updateCinematic(dt: number) {
     if (this.cine < 0) return;
     this.cine += dt;
     const t = this.cine;
-    const k = clamp01(t / TRANSFORM_SECONDS);
-    // explorer turns towards the city; camera pulls back
-    const p = this.d.player;
-    let dh = this.cineHeading - p.heading;
-    dh = Math.atan2(Math.sin(dh), Math.cos(dh));
-    p.heading += dh * Math.min(1, dt * 3);
-    if (t < 2.6) look.zoom += dt * 1.4;
-    // golden flash peaks around the midpoint and hides the swap
-    const flash = Math.exp(-Math.pow((k - 0.45) / 0.16, 2));
-    this.cineEls.flash.style.opacity = (flash * 0.85).toFixed(3);
-    this.cineEls.title.style.opacity = smooth((k - 0.35) / 0.2) * (1 - smooth((k - 0.88) / 0.12)) + '';
-    this.applyEra(k, false);
-    if (t >= TRANSFORM_SECONDS) {
-      this.cine = -1;
-      this.cineEls.flash.style.opacity = '0';
-      this.cineEls.title.hidden = true;
-      this.cineEls.skip.hidden = true;
-      this.applyEra(1, false);
-      this.save.flags.transformed = true;
-      if (this.save.objective === 'walk') this.setObjective('meet');
-      this.setModal('none');
-      this.persist();
+    // camera: swoop up to the elevated view, drift slowly, then return to the explorer
+    const drift = this.poseTo;
+    drift.target.copyFrom(this.poseCity.target);
+    drift.alpha = this.poseCity.alpha + 0.035 * Math.max(0, t - T_SWOOP);
+    drift.beta = this.poseCity.beta;
+    drift.radius = this.poseCity.radius - 2.2 * Math.max(0, t - T_SWOOP);
+    if (t < T_RETURN) {
+      lerpPose(this.poseFrom, drift, smooth(t / T_SWOOP), this.poseOut);
+    } else {
+      const back = this.cineResume ? this.framingPose(newPoseTmp) : this.d.camera.followPose(this.d.player.pos, this.d.player.heading, newPoseTmp);
+      // long, smooth descent: ease the target first, the distance follows
+      lerpPose(drift, back, smooth((t - T_RETURN) / (TRANSFORM_SECONDS - T_RETURN)), this.poseOut);
     }
+    this.shadowFocus = t < T_RETURN ? CITY_VIEW.target : null;
+    // captions: "today" over the ruins, then the date once the city is alive
+    const today = smooth((t - 0.6) / 0.4) * (1 - smooth((t - 2.6) / 0.4));
+    const past = smooth((t - 4.3) / 0.5) * (1 - smooth((t - 6.6) / 0.5));
+    if (today > 0.01) {
+      this.setCaption('Today', 'The ruins of Machu Picchu');
+      this.cineEls.title.style.opacity = today.toFixed(2);
+    } else {
+      this.setCaption('c. 1450', 'The living Inca city');
+      this.cineEls.title.style.opacity = past.toFixed(2);
+    }
+    this.applyEra(clamp01((t - T_ERA0) / (T_ERA1 - T_ERA0)));
+    if (t >= TRANSFORM_SECONDS) this.endCinematic();
+  }
+
+  private lastCaption = '';
+  private setCaption(year: string, name: string) {
+    if (this.lastCaption === year) return;
+    this.lastCaption = year;
+    this.cineEls.year.textContent = year;
+    this.cineEls.name.textContent = name;
+  }
+
+  private endCinematic() {
+    this.cine = -1;
+    this.cineEls.title.hidden = true;
+    this.cineEls.skip.hidden = true;
+    this.applyEra(1);
+    this.shadowFocus = null;
+    const first = !this.cineReplay && !this.save.flags.transformed;
+    this.cineReplay = false;
+    this.save.flags.transformed = true;
+    if (this.save.objective === 'walk' && !this.cineResume) this.setObjective(this.save.flags.introDialogue ? 'gold' : 'meet');
+    if (this.cineResume) {
+      // continue the conversation with Killa
+      const node = this.cineResume;
+      this.cineResume = null;
+      this.setCamMode('frame');
+      this.camT = 1; // already framed
+      this.setModal('dialogue');
+      $('dialogue').hidden = false;
+      this.showNode(node);
+    } else {
+      // the camera already returned behind the explorer during the cinematic
+      this.setModal('none');
+      this.d.camera.pose = null;
+      this.camMode = 'none';
+      if (first && this.save.flags.introDialogue) this.toast('Follow the arrow at the top of the screen ▲');
+    }
+    this.persist();
   }
 
   /** Blend between the present-day ruins (0) and the inhabited settlement (1). */
-  private applyEra(k: number, instant: boolean) {
+  private applyEra(k: number) {
     this.eraK = k;
     const { site, scene, env, audio } = this.d;
     const era = site.era;
-    const rk = smooth((k - 0.3) / 0.6);
+    const win = (a: number, b: number) => smooth((k - a) / (b - a));
+    // 1. stone: fallen blocks sink away, restored courses rise out of the walls
+    const rb = win(0, 0.32);
+    site.rubble.setEnabled(rb < 1);
+    site.rubble.position.y = -0.7 * rb;
+    const cs = win(0.02, 0.38);
+    era.courses.setEnabled(cs > 0);
+    era.courses.position.y = -(COURSE_H + 0.1) * (1 - cs);
+    // 2. thatched roofs drop into place
+    const rk = win(0.26, 0.6);
     era.roofs.setEnabled(rk > 0);
-    era.roofs.position.y = (1 - rk) * 5;
-    era.roofMat.alpha = rk >= 1 ? 1 : rk;
-    era.crops.setEnabled(k > 0.45);
-    site.rubble.setEnabled(k <= 0.45);
-    if (k > 0.5 && !this.smoke.isStarted()) {
-      if (instant) { this.smoke.preWarmCycles = 120; this.smoke.preWarmStepOffset = 6; }
-      this.smoke.start();
+    era.roofs.position.y = (1 - rk) * 6;
+    era.roofMat.alpha = rk >= 1 ? 1 : 0.25 + 0.75 * rk;
+    // 3. terraces are tilled, then the crops grow
+    const so = win(0.38, 0.55);
+    era.soil.setEnabled(so > 0);
+    era.soil.position.y = -0.3 * (1 - so);
+    const cr = win(0.48, 0.85);
+    for (const c of era.crops) {
+      // crops grow up out of the soil (below the surface they are hidden inside the terrace fill)
+      c.setEnabled(cr > 0);
+      c.position.y = -2.1 * (1 - cr);
     }
+    // 4. hearth smoke and people
+    if (k > 0.66 && !this.smoke.isStarted()) {
+      if (k >= 1) { this.smoke.preWarmCycles = 120; this.smoke.preWarmStepOffset = 6; } else { this.smoke.preWarmCycles = 0; }
+      this.smoke.start();
+    } else if (k <= 0.66 && this.smoke.isStarted()) {
+      this.smoke.stop();
+      this.smoke.reset();
+    }
+    this.villagers.setPresence(win(0.66, 0.95));
     audio.era = k >= 0.5;
-    // warmer, clearer light in the living city
+    // 5. warmer, golden light and a clearer, inhabited atmosphere
     const L = smooth(k);
     const b = this.base;
-    env.sun.diffuse.copyFrom(Color3.Lerp(b.sunDiff, new Color3(1.0, 0.86, 0.66), L * 0.85));
-    env.sun.intensity = b.sunInt * (1 + 0.08 * L);
+    Color3.LerpToRef(b.sunDiff, WARM_SUN, L * 0.85, env.sun.diffuse);
+    env.sun.intensity = b.sunInt * (1 + 0.1 * L);
     if (this.hemi) {
       this.hemi.intensity = b.hemiInt * (1 + 0.05 * L);
-      this.hemi.diffuse.copyFrom(Color3.Lerp(b.hemiDiff, new Color3(0.86, 0.84, 0.92), L * 0.6));
+      Color3.LerpToRef(b.hemiDiff, WARM_SKY, L * 0.6, this.hemi.diffuse);
     }
-    scene.fogColor.copyFrom(Color3.Lerp(b.fog, new Color3(0.78, 0.76, 0.74), L * 0.7));
+    Color3.LerpToRef(b.fog, WARM_FOG, L * 0.7, scene.fogColor);
     scene.fogDensity = b.fogDen * (1 - 0.18 * L);
-    scene.imageProcessingConfiguration.exposure = b.exposure + 0.06 * L;
+    scene.imageProcessingConfiguration.exposure = b.exposure + 0.07 * L;
+    scene.imageProcessingConfiguration.contrast = b.contrast + 0.06 * L;
   }
 
   private buildSmoke(): ParticleSystem {
@@ -385,11 +656,86 @@ export class Adventure {
   }
 
   // =====================================================================
-  // Killa, the villager
+  // Killa
   // =====================================================================
 
   private ground(x: number, z: number, fromY: number) {
     return this.d.world.groundAt(x, z, fromY, 0.6).y;
+  }
+
+  /** Decide where Killa stands, given where the explorer (re)starts. */
+  private placeKilla(px = PLAYER_START.x, pz = PLAYER_START.z) {
+    const f = this.save.flags;
+    let x = GATE_SPOT.x;
+    let z = GATE_SPOT.z;
+    if (f.introDialogue || (f.transformed && Math.hypot(px - GATE_SPOT.x, pz - GATE_SPOT.z) > 60)) {
+      x = VILLAGER_HOME.x; z = VILLAGER_HOME.z;
+    } else {
+      // an older save may resume further down the trail: wait a little ahead of the explorer instead
+      const pr = TRAIL_LINE.project(px, pz, { s: 0, d: 0 });
+      const kg = TRAIL_LINE.project(GATE_SPOT.x, GATE_SPOT.z, { s: 0, d: 0 });
+      if (pr.d < 25 && pr.s > kg.s - 2) {
+        const pt = TRAIL_LINE.pointAt(pr.s + 10, { x: 0, z: 0 });
+        x = pt.x; z = pt.z;
+      } else if (pr.d >= 25 && Math.hypot(px - GATE_SPOT.x, pz - GATE_SPOT.z) > 60) {
+        // somewhere in the city without having met her: she waits at the guardhouse instead
+        x = VILLAGER_HOME.x; z = VILLAGER_HOME.z;
+      }
+    }
+    this.killaHome.set(x, this.ground(x, z, 200), z);
+    this.killaPos.copyFrom(this.killaHome);
+    // face back towards the Sun Gate / approaching explorer
+    this.killaHomeHeading = Math.atan2(px - x, pz - z);
+    if (x === VILLAGER_HOME.x) this.killaHomeHeading = Math.atan2(0 - VILLAGER_HOME.x, -112 - VILLAGER_HOME.z);
+    this.killaHeading = this.killaHomeHeading;
+    this.killa.root.position.copyFrom(this.killaPos);
+    this.killa.root.rotation.y = this.killaHeading;
+  }
+
+  /** The explorer walked on past Killa without coming close (e.g. around her). */
+  private passedKilla() {
+    const p = this.d.player.pos;
+    const pr = TRAIL_LINE.project(p.x, p.z, this.tmpProj);
+    const ps = pr.s;
+    const pd = pr.d;
+    const ks = TRAIL_LINE.project(this.killaPos.x, this.killaPos.z, this.tmpProj).s;
+    return pd < 30 && ps > ks + 6 && Math.hypot(p.x - this.killaPos.x, p.z - this.killaPos.z) < 40;
+  }
+  private tmpProj = { s: 0, d: 0 };
+
+  private buildBubble(): Mesh {
+    const { scene } = this.d;
+    const t = new DynamicTexture('bubbleTex', 128, scene, true);
+    const c = t.getContext() as unknown as CanvasRenderingContext2D;
+    c.clearRect(0, 0, 128, 128);
+    c.fillStyle = 'rgba(255,248,230,0.95)';
+    c.strokeStyle = 'rgba(154,109,23,1)';
+    c.lineWidth = 6;
+    c.beginPath();
+    c.ellipse(64, 54, 54, 40, 0, 0, Math.PI * 2);
+    c.fill();
+    c.stroke();
+    c.beginPath();
+    c.moveTo(48, 88); c.lineTo(40, 118); c.lineTo(70, 92);
+    c.fill();
+    c.fillStyle = '#c8901f';
+    for (const x of [38, 64, 90]) { c.beginPath(); c.arc(x, 54, 8, 0, Math.PI * 2); c.fill(); }
+    t.hasAlpha = true;
+    t.update();
+    const m = new StandardMaterial('bubbleMat', scene);
+    m.diffuseTexture = t;
+    m.useAlphaFromDiffuseTexture = true;
+    m.emissiveColor = new Color3(1, 1, 1);
+    m.disableLighting = true;
+    m.backFaceCulling = false;
+    m.fogEnabled = false;
+    const p = MeshBuilder.CreatePlane('killaBubble', { size: 0.6 }, scene);
+    p.material = m;
+    p.billboardMode = Mesh.BILLBOARDMODE_ALL;
+    p.parent = this.killa.root;
+    p.position.y = 2.25;
+    p.isPickable = false;
+    return p;
   }
 
   private updateKilla(dt: number, time: number) {
@@ -397,35 +743,47 @@ export class Adventure {
     const k = this.killaPos;
     const dx = player.pos.x - k.x;
     const dz = player.pos.z - k.z;
-    const d = Math.hypot(dx, dz);
-    const on = this.eraK >= 1 && d < 90;
+    const d = Math.hypot(dx, dz) || 0.001;
+
+    // after the first meeting she goes ahead to the guardhouse, out of the explorer's sight
+    if (this.relocateToGuardhouse && this.meeting === 'none' && this.cine < 0) {
+      const cam = this.d.camera.cam;
+      const fx = cam.target.x - cam.position.x;
+      const fz = cam.target.z - cam.position.z;
+      const behind = fx * (k.x - cam.position.x) + fz * (k.z - cam.position.z) < 0;
+      if ((d > 35 && behind) || d > 70) {
+        this.relocateToGuardhouse = false;
+        this.killaHome.set(VILLAGER_HOME.x, this.ground(VILLAGER_HOME.x, VILLAGER_HOME.z, VILLAGER_HOME.y + 2), VILLAGER_HOME.z);
+        this.killaHomeHeading = Math.atan2(0 - VILLAGER_HOME.x, -112 - VILLAGER_HOME.z);
+        k.copyFrom(this.killaHome);
+        this.killaHeading = this.killaHomeHeading;
+        this.killaSpeed = 0;
+      }
+    }
+    const kd = Math.hypot(player.pos.x - k.x, player.pos.z - k.z);
+    const on = kd < 140 || this.cine >= 0;
     this.killa.root.setEnabled(on);
     if (!on) return;
-    const talking = this.modal === 'dialogue';
-    let tx = VILLAGER_HOME.x;
-    let tz = VILLAGER_HOME.z;
-    if (!this.save.flags.introDialogue && d < 18 && !talking) {
-      // walk out to greet the explorer, but stay near home
-      if (!this.greeted && d < 15) {
-        this.greeted = true;
-        this.toast('Killa: “Allillanchu! Over here, traveller!”', 'speech');
-      }
-      tx = player.pos.x - (dx / d) * 2.0;
-      tz = player.pos.z - (dz / d) * 2.0;
-      const hx = tx - VILLAGER_HOME.x;
-      const hz = tz - VILLAGER_HOME.z;
-      const hd = Math.hypot(hx, hz);
-      if (hd > 9) { tx = VILLAGER_HOME.x + (hx / hd) * 9; tz = VILLAGER_HOME.z + (hz / hd) * 9; }
+
+    const talking = this.meeting === 'talk' || this.modal === 'dialogue';
+    let tx = this.killaHome.x;
+    let tz = this.killaHome.z;
+    if (this.meeting === 'approach') {
+      // walk up to the explorer and stop at a comfortable distance
+      tx = player.pos.x - (dx / d) * 1.9;
+      tz = player.pos.z - (dz / d) * 1.9;
+    } else if (talking || this.cine >= 0) {
+      tx = k.x; tz = k.z;
     }
     const mx = tx - k.x;
     const mz = tz - k.z;
     const md = Math.hypot(mx, mz);
     let want = 0;
-    let face = this.killaHeading;
-    if (md > 0.35 && !talking) {
-      want = Math.min(1.5, md * 1.2);
+    let face = this.killaHomeHeading;
+    if (md > 0.3) {
+      want = Math.min(this.meeting === 'approach' ? 1.7 : 1.4, md * 1.4);
       face = Math.atan2(mx, mz);
-    } else if (d < 9) {
+    } else if (d < 14 || talking) {
       face = Math.atan2(dx, dz);
     }
     this.killaSpeed += (want - this.killaSpeed) * Math.min(1, dt * 5);
@@ -441,64 +799,235 @@ export class Adventure {
     }
     this.killa.root.position.copyFrom(k);
     this.killa.root.rotation.y = this.killaHeading;
+    // greeting wave while the explorer approaches for the first time; gestures while she speaks
+    const waving = !this.save.flags.introDialogue && this.meeting !== 'talk' && d < 32 && d > 2.6 && this.cine < 0;
+    this.killa.wave += ((waving ? 1 : 0) - this.killa.wave) * Math.min(1, dt * 4);
+    const speaking = this.modal === 'dialogue' && this.meeting !== 'approach' && (this.voice.status === 'speaking' || this.advanceTimer > 0);
+    this.killa.talk += ((speaking ? 1 : 0) - this.killa.talk) * Math.min(1, dt * 4);
     this.killa.animate(dt, this.killaSpeed, true, 0, time + 1.7);
+    // speech bubble: someone to talk to
+    const bubble = this.modal === 'none' && this.cine < 0 && (!this.save.flags.introDialogue || d < 22);
+    if (this.bubble.isEnabled() !== bubble) this.bubble.setEnabled(bubble);
+    if (bubble) this.bubble.position.y = 2.25 + Math.sin(time * 2.4) * 0.06;
   }
 
   // =====================================================================
-  // Dialogue
+  // Meeting Killa and conversations (spoken + subtitles)
   // =====================================================================
 
+  private beginMeeting() {
+    this.meeting = 'approach';
+    this.meetT = 0;
+    this.setModal('dialogue');
+    this.voice.stop();
+    this.pickFrameSide();
+    this.setCamMode('frame');
+    this.dialogueTree = this.save.flags.transformed ? MEET_LATE_DIALOGUE : MEET_DIALOGUE;
+  }
+
+  private updateMeetingApproach(dt: number) {
+    if (this.meeting !== 'approach') return;
+    this.meetT += dt;
+    const p = this.d.player;
+    // the explorer turns to face Killa
+    const want = Math.atan2(this.killaPos.x - p.pos.x, this.killaPos.z - p.pos.z);
+    p.heading += wrapA(want - p.heading) * Math.min(1, dt * 5);
+    const d = Math.hypot(p.pos.x - this.killaPos.x, p.pos.z - this.killaPos.z);
+    if ((d < 2.2 && this.killaSpeed < 0.3) || this.meetT > 3.5) {
+      this.meeting = 'talk';
+      $('dialogue').hidden = false;
+      this.showNode('start');
+    }
+  }
+
+  /** Later conversations (TALK prompt). */
   openDialogue() {
     const f = this.save.flags;
-    this.dialogueTree = f.treasure || this.save.puzzles.includes(PUZZLE_ID) ? AFTER_DIALOGUE : f.introDialogue ? REPEAT_DIALOGUE : INTRO_DIALOGUE;
+    this.dialogueTree = f.treasure || this.save.puzzles.includes(PUZZLE_ID) ? AFTER_DIALOGUE : REPEAT_DIALOGUE;
     const p = this.d.player;
-    // face each other
     this.killaHeading = Math.atan2(p.pos.x - this.killaPos.x, p.pos.z - this.killaPos.z);
     p.heading = Math.atan2(this.killaPos.x - p.pos.x, this.killaPos.z - p.pos.z);
     this.setModal('dialogue');
+    this.pickFrameSide();
+    this.setCamMode('frame');
     $('dialogue').hidden = false;
     this.showNode('start');
+  }
+
+  private get firstMeeting() {
+    return this.dialogueTree === MEET_DIALOGUE || this.dialogueTree === MEET_LATE_DIALOGUE;
+  }
+
+  /** Subtitles are shown when chosen, or whenever the voice cannot be heard. */
+  private get subtitlesVisible() {
+    return this.prefs.subs || !this.voice.audible;
   }
 
   private showNode(id: string) {
     const n = this.dialogueTree[id];
     if (!n) { this.closeDialogue(); return; }
+    this.nodeId = id;
+    this.advanceTimer = 0;
     $('dlg-speaker').textContent = n.speaker;
     $('dlg-text').textContent = n.text;
     const note = $('dlg-note');
     note.hidden = !n.note;
     if (n.note) note.innerHTML = noteHtml(n.note);
-    if (id === 'mystery') this.unlockNote('The three worlds');
+    if (id === 'mystery' || id === 'stones') this.unlockNote('The three worlds');
+    $('dlg-skip').hidden = !this.firstMeeting;
     const box = $('dlg-choices');
     box.innerHTML = '';
-    this.choiceHandlers = n.choices.map((c, i) => {
+    const choices = n.choices.length ? n.choices : [{ text: 'Next ▸', next: n.next ?? null, effect: undefined }];
+    this.choiceHandlers = choices.map((c, i) => {
       const run = () => {
+        if (this.nodeId !== id || this.modal !== 'dialogue') return;
         this.d.audio.click();
-        if (c.effect === 'startGold') this.finishIntro();
-        if (c.next) this.showNode(c.next);
-        else this.closeDialogue();
+        this.leaveNode(n, c.next, c.effect);
       };
       const b = document.createElement('button');
-      b.className = 'choice';
-      b.innerHTML = `<span class="num">${i + 1}</span>${esc(c.text)}`;
+      b.className = n.choices.length ? 'choice' : 'choice next';
+      b.innerHTML = n.choices.length ? `<span class="num">${i + 1}</span>${esc(c.text)}` : esc(c.text);
       b.addEventListener('click', run);
       box.appendChild(b);
       return run;
     });
+    // speak the line; continue automatically when it has been heard
+    const heard = this.voice.speak({ text: n.text, clip: n.clip }, () => {
+      if (this.nodeId === id && this.modal === 'dialogue' && !n.choices.length) this.advanceTimer = 0.6;
+    });
+    void heard;
+    this.refreshVoiceUi();
+  }
+
+  /** Leave the current node via a choice / Next / auto-advance. */
+  private leaveNode(n: DialogueNode, next: string | null, choiceEffect?: string) {
+    this.voice.stop();
+    this.advanceTimer = 0;
+    const effect = choiceEffect ?? n.effect;
+    if (effect === 'finishIntro') this.finishIntro();
+    if (effect === 'transform') {
+      if (!this.save.flags.transformed) { this.startTransformation(next); return; }
+    }
+    if (next) this.showNode(next);
+    else this.closeDialogue();
+  }
+
+  private updateDialogueTimer(dt: number) {
+    this.updateMeetingApproach(dt);
+    if (this.advanceTimer <= 0 || this.modal !== 'dialogue') return;
+    this.advanceTimer -= dt;
+    if (this.advanceTimer <= 0) {
+      this.advanceTimer = 0;
+      const n = this.dialogueTree[this.nodeId];
+      if (n && !n.choices.length) this.leaveNode(n, n.next ?? null);
+    }
+  }
+
+  /** Skip the rest of the first meeting (the transformation still plays, and can be skipped too). */
+  skipIntro() {
+    if (!this.firstMeeting || this.modal !== 'dialogue') return;
+    this.voice.stop();
+    this.finishIntro();
+    this.meeting = 'none';
+    this.dialogueTree = REPEAT_DIALOGUE;
+    $('dialogue').hidden = true;
+    if (!this.save.flags.transformed) {
+      this.setModal('none');
+      this.startTransformation(null);
+    } else {
+      this.closeDialogue();
+      this.toast('Follow the arrow at the top of the screen ▲');
+    }
   }
 
   private finishIntro() {
     if (this.save.flags.introDialogue) return;
     this.save.flags.introDialogue = true;
     this.unlockNote('Killa');
-    if (this.save.objective === 'meet' || this.save.objective === 'walk') this.setObjective('gold');
-    this.save.checkpoint = 'guardhouse';
+    if (['meet', 'walk'].includes(this.save.objective)) this.setObjective('gold');
+    this.save.checkpoint = 'sungate';
+    this.relocateToGuardhouse = true;
     this.persist();
   }
 
   private closeDialogue() {
+    this.voice.stop();
+    this.advanceTimer = 0;
+    this.meeting = 'none';
     $('dialogue').hidden = true;
+    const wasFirst = this.firstMeeting;
+    this.dialogueTree = REPEAT_DIALOGUE;
     this.setModal('none');
+    this.setCamMode('release');
+    if (wasFirst && this.save.flags.introDialogue) this.toast('Follow the arrow at the top of the screen ▲');
+  }
+
+  // ---- voice / subtitle preferences ----
+
+  private refreshVoiceUi() {
+    const blocked = this.voice.status === 'blocked' && this.prefs.voice && this.voice.supported;
+    $('dlg-play').hidden = !blocked || this.modal !== 'dialogue';
+    const subs = this.subtitlesVisible;
+    $('dlg-text').classList.toggle('hidden-subs', !subs);
+    $('dlg-speaking').hidden = subs || this.voice.status !== 'speaking';
+    this.refreshPrefsUi();
+  }
+
+  private refreshPrefsUi() {
+    const p = this.prefs;
+    const cc = $('btn-cc');
+    cc.classList.toggle('off', !p.subs);
+    cc.setAttribute('aria-pressed', String(p.subs));
+    cc.title = p.subs ? 'Subtitles on' : 'Subtitles off';
+    const v = $('btn-voice');
+    const canSpeak = this.voice.supported;
+    v.textContent = p.voice && canSpeak ? '🔊' : '🔇';
+    v.classList.toggle('off', !p.voice || !canSpeak);
+    v.setAttribute('aria-pressed', String(p.voice && canSpeak));
+    v.title = !canSpeak ? 'Spoken dialogue is not supported in this browser' : p.voice ? 'Killa’s voice on' : 'Killa’s voice off';
+    $('set-voice').textContent = !canSpeak ? 'Not supported' : p.voice ? 'On' : 'Off';
+    $('set-subs').textContent = p.subs ? 'On' : 'Off (shown when voice is off)';
+    $('set-sound').textContent = p.sound ? 'On' : 'Off';
+    $('set-voice-name').textContent = canSpeak
+      ? `Killa’s voice is generated by your browser’s built-in speech synthesis${this.voice.voiceName ? ` (${this.voice.voiceName})` : ''}. It is not a recorded actor.`
+      : 'This browser has no speech synthesis, so Killa’s lines are shown as text.';
+  }
+
+  setVoice(on: boolean) {
+    this.prefs.voice = on;
+    this.voice.enabled = on;
+    savePrefs(this.prefs);
+    if (!on) this.voice.stop();
+    else {
+      this.voice.resetBlocked();
+      // speak the current line again so the player hears it (this runs inside a tap)
+      const n = this.dialogueTree[this.nodeId];
+      if (this.modal === 'dialogue' && n && this.meeting !== 'approach') {
+        this.voice.speak({ text: n.text, clip: n.clip }, () => {
+          if (this.dialogueTree[this.nodeId] === n && !n.choices.length) this.advanceTimer = 0.6;
+        });
+      }
+    }
+    this.refreshVoiceUi();
+  }
+
+  setSubtitles(on: boolean) {
+    this.prefs.subs = on;
+    savePrefs(this.prefs);
+    this.refreshVoiceUi();
+  }
+
+  setSound(on: boolean) {
+    this.prefs.sound = on;
+    this.d.audio.setMuted(!on);
+    savePrefs(this.prefs);
+    this.refreshPrefsUi();
+  }
+
+  /** Revisit the Sun Gate: watch the city come to life again (progress is unaffected). */
+  replayTransformation() {
+    if (!this.save.flags.transformed || this.modal !== 'none') return;
+    this.startTransformation(null, true);
   }
 
   // =====================================================================
@@ -531,7 +1060,6 @@ export class Adventure {
     coin.material = m;
     coin.isPickable = false;
     coin.alwaysSelectAsActiveMesh = true;
-    coin.thinInstanceSetBuffer('matrix', new Float32Array(this.coins.length * 16), 16, false);
     return coin;
   }
 
@@ -545,8 +1073,8 @@ export class Adventure {
     this.coinMesh.setEnabled(visible);
     if (!visible) return;
     const p = this.d.player.pos;
-    let changed = false;
-    this.coins.forEach((c, i) => {
+    for (let i = 0; i < this.coins.length; i++) {
+      const c = this.coins[i];
       let s = 1;
       let y = c.y + Math.sin(time * 2.2 + i) * 0.08;
       if (c.taken) {
@@ -566,9 +1094,10 @@ export class Adventure {
       this.tmpP.set(c.x, y, c.z);
       Matrix.ComposeToRef(this.tmpS, this.tmpQ, this.tmpP, this.tmpM);
       this.tmpM.copyToArray(this.coinMatrices, i * 16);
-      changed = true;
-    });
-    if (changed) this.coinMesh.thinInstanceSetBuffer('matrix', this.coinMatrices, 16, false);
+    }
+    // Performance: update the existing GPU buffer. (Milestone C called thinInstanceSetBuffer here,
+    // which disposes and re-creates the vertex buffer every frame.)
+    this.coinMesh.thinInstanceBufferUpdated('matrix');
   }
 
   private collectCoin(c: { id: string; x: number; y: number; z: number; taken: boolean; anim: number }) {
@@ -808,6 +1337,7 @@ export class Adventure {
     this.save.puzzles.push(PUZZLE_ID);
     this.save.checkpoint = 'mechanism';
     this.setObjective('chamber');
+    this.setObjectiveMarkers(false);
     $('pz-status').textContent = 'The wheels lock into place. Behind you, stone grinds against stone…';
     this.d.audio.unlock();
     this.puzzleSolvedAnim = 0;
@@ -828,6 +1358,7 @@ export class Adventure {
     this.wheelNodes.forEach((n, i) => { n.rotation.y = this.wheelAngles[i]; });
     if (this.doorBox) { this.d.world.removeBox(this.doorBox); this.doorBox = null; }
     this.door.setEnabled(false);
+    this.setObjectiveMarkers(false);
   }
 
   private savedZoom = 6.5;
@@ -857,28 +1388,244 @@ export class Adventure {
   }
 
   // =====================================================================
+  // The carved doorway: a landmark that makes the first puzzle easy to find
+  // (painted lintel, carved jambs, torches, banners; a light beacon and marker until it is solved)
+  // =====================================================================
+
+  private buildDoorway(): { beacon: Mesh; marker: Mesh } {
+    const { scene, site, world, env } = this.d;
+    const { door, zFront } = CHAMBER;
+    const fine = site.builder.mats.fine;
+    const front = zFront + 0.02;
+    const parts: Mesh[] = [];
+    // carved jambs either side of the door, and a deep lintel
+    for (const sx of [-1, 1]) {
+      const j = MeshBuilder.CreateBox('jamb', { width: 0.55, height: 2.9, depth: 0.5, wrap: true }, scene);
+      j.position.set(door.x + sx * (door.w / 2 + 0.32), 2.9 / 2 - 0.35, front + 0.2);
+      parts.push(j);
+      world.addBox(j.position.x, j.position.z, 0.55, 0.5, -0.4, 2.55, 0);
+    }
+    const lintel = MeshBuilder.CreateBox('lintel', { width: door.w + 1.5, height: 0.5, depth: 0.55, wrap: true }, scene);
+    lintel.position.set(door.x, 2.3, front + 0.22);
+    parts.push(lintel);
+    const frame = Mesh.MergeMeshes(parts, true, true)!;
+    frame.name = 'doorwayFrame';
+    frame.material = fine;
+    frame.receiveShadows = true;
+    frame.isPickable = false;
+    env.shadows?.addShadowCaster(frame, false);
+
+    // painted decoration: stepped (chakana-like) and zig-zag patterns in ochre, red and gold.
+    // Purely decorative: they do not reveal the wheel combination.
+    const paint = new DynamicTexture('doorPaint', { width: 512, height: 128 }, scene, true);
+    const c = paint.getContext() as unknown as CanvasRenderingContext2D;
+    c.fillStyle = '#7a2a1c';
+    c.fillRect(0, 0, 512, 128);
+    c.fillStyle = '#d9a43a';
+    for (let i = 0; i < 8; i++) {
+      const x = i * 64 + 32;
+      c.fillRect(x - 6, 24, 12, 80);
+      c.fillRect(x - 22, 46, 44, 36);
+      c.fillRect(x - 14, 34, 28, 60);
+    }
+    c.fillStyle = '#2d4a5c';
+    for (let i = 0; i < 8; i++) c.fillRect(i * 64 + 26, 58, 12, 12);
+    c.strokeStyle = '#e8c25a';
+    c.lineWidth = 6;
+    c.strokeRect(4, 4, 504, 120);
+    paint.update();
+    const pm = new StandardMaterial('doorPaintMat', scene);
+    pm.diffuseTexture = paint;
+    pm.specularColor = new Color3(0.05, 0.05, 0.05);
+    pm.emissiveColor = new Color3(0.12, 0.08, 0.05);
+    const band = MeshBuilder.CreatePlane('doorBand', { width: door.w + 1.4, height: 0.4 }, scene);
+    band.position.set(door.x, 2.3, front + 0.505);
+    band.rotation.y = Math.PI;
+    band.material = pm;
+    band.isPickable = false;
+    const jt = new DynamicTexture('jambPaint', { width: 64, height: 256 }, scene, true);
+    const jc = jt.getContext() as unknown as CanvasRenderingContext2D;
+    jc.fillStyle = '#7a2a1c';
+    jc.fillRect(0, 0, 64, 256);
+    jc.strokeStyle = '#d9a43a';
+    jc.lineWidth = 9;
+    jc.beginPath();
+    for (let y = 0; y <= 256; y += 32) jc.lineTo(y % 64 === 0 ? 14 : 50, y);
+    jc.stroke();
+    jt.update();
+    const jm = new StandardMaterial('jambPaintMat', scene);
+    jm.diffuseTexture = jt;
+    jm.specularColor = new Color3(0.05, 0.05, 0.05);
+    jm.emissiveColor = new Color3(0.1, 0.07, 0.04);
+    for (const sx of [-1, 1]) {
+      const p = MeshBuilder.CreatePlane('jambBand', { width: 0.3, height: 1.6 }, scene);
+      p.position.set(door.x + sx * (door.w / 2 + 0.32), 1.05, front + 0.47);
+      p.rotation.y = Math.PI;
+      p.material = jm;
+      p.isPickable = false;
+    }
+
+    // torches in bronze brackets on the jambs
+    const flameTex = new DynamicTexture('flameTex', { width: 64, height: 128 }, scene, false);
+    const fc = flameTex.getContext() as unknown as CanvasRenderingContext2D;
+    const grd = fc.createRadialGradient(32, 92, 2, 32, 80, 60);
+    grd.addColorStop(0, 'rgba(255,250,210,1)');
+    grd.addColorStop(0.25, 'rgba(255,200,80,0.95)');
+    grd.addColorStop(0.6, 'rgba(240,110,20,0.6)');
+    grd.addColorStop(1, 'rgba(200,60,10,0)');
+    fc.fillStyle = grd;
+    fc.beginPath();
+    fc.moveTo(32, 2);
+    fc.quadraticCurveTo(62, 80, 40, 124);
+    fc.lineTo(24, 124);
+    fc.quadraticCurveTo(2, 80, 32, 2);
+    fc.fill();
+    flameTex.hasAlpha = true;
+    flameTex.update();
+    const fm = new StandardMaterial('flameMat', scene);
+    fm.diffuseTexture = flameTex;
+    fm.opacityTexture = flameTex;
+    fm.emissiveColor = new Color3(1, 0.75, 0.4);
+    fm.disableLighting = true;
+    fm.backFaceCulling = false;
+    fm.alphaMode = 1; // additive
+    const bronze = new StandardMaterial('bronzeMat', scene);
+    bronze.diffuseColor = new Color3(0.45, 0.3, 0.14);
+    bronze.specularColor = new Color3(0.5, 0.4, 0.2);
+    for (const sx of [-1, 1]) {
+      const x = door.x + sx * (door.w / 2 + 0.32);
+      const holder = MeshBuilder.CreateCylinder('torch', { height: 0.5, diameterTop: 0.16, diameterBottom: 0.06, tessellation: 8 }, scene);
+      holder.position.set(x, 1.85, front + 0.62);
+      holder.material = bronze;
+      holder.isPickable = false;
+      const f = MeshBuilder.CreatePlane('flame', { width: 0.36, height: 0.62 }, scene);
+      f.position.set(x, 2.32, front + 0.64);
+      f.billboardMode = Mesh.BILLBOARDMODE_Y;
+      f.material = fm;
+      f.isPickable = false;
+      this.flames.push(f);
+    }
+
+    // tall poles with woven banners, visible from the terraces above
+    const cloth = new DynamicTexture('bannerTex', { width: 64, height: 256 }, scene, true);
+    const bc = cloth.getContext() as unknown as CanvasRenderingContext2D;
+    const stripes = ['#b3261e', '#e0a530', '#b3261e', '#2f5d7a', '#b3261e', '#e0a530', '#6b2f6b', '#b3261e'];
+    stripes.forEach((col, i) => { bc.fillStyle = col; bc.fillRect(0, i * 32, 64, 32); });
+    bc.fillStyle = '#f2dfa0';
+    for (let i = 0; i < 8; i++) { bc.beginPath(); bc.moveTo(8, i * 32 + 16); bc.lineTo(32, i * 32 + 4); bc.lineTo(56, i * 32 + 16); bc.lineTo(32, i * 32 + 28); bc.fill(); }
+    cloth.update();
+    const cm = new StandardMaterial('bannerMat', scene);
+    cm.diffuseTexture = cloth;
+    cm.backFaceCulling = false;
+    cm.twoSidedLighting = true;
+    cm.specularColor = new Color3(0.02, 0.02, 0.02);
+    cm.emissiveColor = new Color3(0.15, 0.1, 0.08);
+    const wood = new StandardMaterial('poleMat', scene);
+    wood.diffuseColor = new Color3(0.36, 0.25, 0.14);
+    for (const sx of [-1, 1]) {
+      const x = door.x + sx * 3.2;
+      const z = front + 1.4;
+      const pole = MeshBuilder.CreateCylinder('bannerPole', { height: 5.2, diameter: 0.12, tessellation: 6 }, scene);
+      pole.position.set(x, 2.6, z);
+      pole.material = wood;
+      pole.isPickable = false;
+      world.addBox(x, z, 0.2, 0.2, -0.5, 5, 0);
+      const flag = MeshBuilder.CreatePlane('banner', { width: 0.75, height: 2.6 }, scene);
+      flag.setPivotPoint(new Vector3(-0.375, 0, 0));
+      flag.position.set(x + 0.43, 3.75, z);
+      flag.material = cm;
+      flag.isPickable = false;
+      this.banners.push(flag);
+      env.shadows?.addShadowCaster(flag, false);
+    }
+
+    // objective beacon: a soft column of golden light, plus a floating marker over the stones
+    const bt = new DynamicTexture('beaconTex', { width: 8, height: 128 }, scene, false);
+    const bctx = bt.getContext() as unknown as CanvasRenderingContext2D;
+    const bg = bctx.createLinearGradient(0, 0, 0, 128);
+    bg.addColorStop(0, 'rgba(255,220,120,0)');
+    bg.addColorStop(0.55, 'rgba(255,210,110,0.32)');
+    bg.addColorStop(0.88, 'rgba(255,225,150,0.45)');
+    bg.addColorStop(1, 'rgba(255,230,160,0)');
+    bctx.fillStyle = bg;
+    bctx.fillRect(0, 0, 8, 128);
+    bt.hasAlpha = true;
+    bt.update();
+    const bm = new StandardMaterial('beaconMat', scene);
+    bm.diffuseTexture = bt;
+    bm.opacityTexture = bt;
+    bm.emissiveColor = new Color3(1, 0.82, 0.45);
+    bm.disableLighting = true;
+    bm.backFaceCulling = false;
+    bm.alphaMode = 1;
+    const beacon = MeshBuilder.CreateCylinder('beacon', { height: 34, diameterTop: 1.4, diameterBottom: 0.6, tessellation: 12, cap: Mesh.NO_CAP }, scene);
+    beacon.position.set(MECHANISM.x, 17 + 2.6, MECHANISM.z - 2.3);
+    beacon.material = bm;
+    beacon.isPickable = false;
+    const mm = new StandardMaterial('markerMat2', scene);
+    mm.diffuseColor = new Color3(1, 0.78, 0.25);
+    mm.emissiveColor = new Color3(0.7, 0.48, 0.1);
+    mm.specularColor = new Color3(1, 0.9, 0.6);
+    const marker = MeshBuilder.CreatePolyhedron('objMarker', { type: 1, size: 0.28 }, scene);
+    marker.scaling.y = 1.6;
+    marker.position.set(MECHANISM.x, 3.4, MECHANISM.z);
+    marker.material = mm;
+    marker.isPickable = false;
+    return { beacon, marker };
+  }
+
+  private setObjectiveMarkers(on: boolean) {
+    if (this.beacon.isEnabled() === on) return;
+    this.beacon.setEnabled(on);
+    this.marker.setEnabled(on);
+  }
+
+  private updateDoorway(time: number) {
+    for (let i = 0; i < this.flames.length; i++) {
+      const f = this.flames[i];
+      const n = Math.sin(time * 13 + i * 2) * 0.5 + Math.sin(time * 23 + i) * 0.3;
+      f.scaling.set(1 + n * 0.08, 1 + n * 0.16, 1);
+    }
+    for (let i = 0; i < this.banners.length; i++) {
+      this.banners[i].rotation.y = Math.sin(time * 0.9 + i * 1.7) * 0.25;
+    }
+    if (this.marker.isEnabled()) {
+      this.marker.rotation.y = time * 1.4;
+      this.marker.position.y = 3.4 + Math.sin(time * 2) * 0.12;
+    }
+  }
+
+  // =====================================================================
   // Interactions, HUD, journal
   // =====================================================================
 
+  private readonly actTalk: Interaction = { label: 'TALK', text: 'Talk to Killa', act: () => this.openDialogue() };
+  private readonly actExamine: Interaction = { label: 'EXAMINE', text: 'Examine the turning stones', act: () => this.openPuzzle() };
+  private readonly actTake: Interaction = { label: 'TAKE', text: 'Take the golden llama', act: () => this.takeRelic() };
+  private readonly actWatch: Interaction = { label: 'WATCH', text: 'Watch Machu Picchu come to life', act: () => this.replayTransformation() };
+
   private findInteraction(): Interaction | null {
     const p = this.d.player.pos;
-    if (this.eraK >= 1 && this.killa.root.isEnabled() && Math.hypot(p.x - this.killaPos.x, p.z - this.killaPos.z) < 2.8) {
-      return { label: 'TALK', text: 'Talk to Killa', act: () => this.openDialogue() };
+    const s = this.save;
+    if (s.flags.introDialogue && this.killa.root.isEnabled() && Math.hypot(p.x - this.killaPos.x, p.z - this.killaPos.z) < 2.8) {
+      return this.actTalk;
     }
-    if (!this.save.puzzles.includes(PUZZLE_ID) && Math.hypot(p.x - MECH_FRONT.x, p.z - MECH_FRONT.z) < 2.0 && Math.abs(p.y - this.coins[0].y) < 100) {
-      return { label: 'EXAMINE', text: 'Examine the turning stones', act: () => this.openPuzzle() };
+    if (!s.puzzles.includes(PUZZLE_ID) && Math.hypot(p.x - MECH_FRONT.x, p.z - MECH_FRONT.z) < 2.0 && p.y < 10) {
+      return this.actExamine;
     }
-    if (!this.save.flags.treasure && this.save.puzzles.includes(PUZZLE_ID) && Math.hypot(p.x - RELIC_SPOT.x, p.z - RELIC_SPOT.z) < 1.9) {
-      return { label: 'TAKE', text: 'Take the golden llama', act: () => this.takeRelic() };
+    if (!s.flags.treasure && s.puzzles.includes(PUZZLE_ID) && Math.hypot(p.x - RELIC_SPOT.x, p.z - RELIC_SPOT.z) < 1.9) {
+      return this.actTake;
+    }
+    if (s.flags.transformed && s.flags.introDialogue && Math.hypot(p.x - SUN_GATE.x, p.z - SUN_GATE.z) < 4.5) {
+      return this.actWatch;
     }
     return null;
   }
 
-  private lastPrompt = '';
+  private lastPrompt: Interaction | null = null;
   private showPrompt(i: Interaction | null) {
-    const key = i ? i.label + i.text : '';
-    if (key === this.lastPrompt) return;
-    this.lastPrompt = key;
+    if (i === this.lastPrompt) return; // interactions are preallocated: compare by identity
+    this.lastPrompt = i;
     const prompt = $('prompt');
     const btn = $('btn-action');
     if (!i) { prompt.hidden = true; btn.hidden = true; return; }
@@ -895,6 +1642,8 @@ export class Adventure {
   private setModal(m: Modal) {
     this.modal = m;
     document.body.classList.toggle('modal', m !== 'none');
+    document.body.classList.toggle('cine', m === 'cinematic');
+    document.body.classList.toggle('talking', m === 'dialogue');
     if (m !== 'none') {
       this.d.input.clearHeld();
       this.showPrompt(null);
@@ -1002,6 +1751,21 @@ export class Adventure {
 
   /** set when the player wipes progress, so pagehide does not re-save */
   resetting = false;
+  private settingsOverlay = false;
+
+  openSettings() {
+    if (!$('settings').hidden) { this.closeSettings(); return; }
+    this.refreshPrefsUi();
+    $('settings').hidden = false;
+    if (this.modal === 'none') this.setModal('settings');
+    else this.settingsOverlay = true; // over a conversation or cinematic: leave that running
+  }
+
+  closeSettings() {
+    $('settings').hidden = true;
+    if (this.settingsOverlay) this.settingsOverlay = false;
+    else if (this.modal === 'settings') this.setModal('none');
+  }
 
   private wireUi() {
     const { input } = this.d;
@@ -1009,20 +1773,40 @@ export class Adventure {
     $('btn-journal').addEventListener('click', () => this.toggleJournal());
     $('journal-close').addEventListener('click', () => this.closeJournal());
     $('pz-close').addEventListener('click', () => this.closePuzzle());
+    $('dlg-skip').addEventListener('click', () => this.skipIntro());
+    $('dlg-play').addEventListener('click', () => { this.voice.retry(); this.refreshVoiceUi(); });
+    $('btn-cc').addEventListener('click', () => this.setSubtitles(!this.prefs.subs));
+    $('btn-voice').addEventListener('click', () => {
+      if (this.voice.supported) this.setVoice(!this.prefs.voice);
+      else this.toast('Spoken dialogue is not supported in this browser: subtitles are shown instead');
+    });
+    $('btn-settings').addEventListener('click', () => this.openSettings());
+    $('settings-close').addEventListener('click', () => this.closeSettings());
+    $('set-voice').addEventListener('click', () => { if (this.voice.supported) this.setVoice(!this.prefs.voice); });
+    $('set-subs').addEventListener('click', () => this.setSubtitles(!this.prefs.subs));
+    $('set-sound').addEventListener('click', () => this.setSound(!this.prefs.sound));
+    $('set-help').addEventListener('click', () => { $('help').hidden = false; });
     window.addEventListener('keydown', (e) => {
       if (e.code === 'Escape') {
-        if (this.modal === 'cinematic') this.skipTransformation();
+        if (!$('settings').hidden) this.closeSettings();
+        else if (this.modal === 'cinematic') this.skipTransformation();
         else if (this.modal === 'journal') this.closeJournal();
         else if (this.modal === 'puzzle') this.closePuzzle();
-        else if (this.modal === 'dialogue' && this.save.flags.introDialogue) this.closeDialogue();
+        else if (this.modal === 'dialogue') {
+          if (this.firstMeeting) this.skipIntro();
+          else this.closeDialogue();
+        }
       }
-      if (this.modal === 'dialogue') {
+      if (this.modal === 'dialogue' && this.meeting !== 'approach') {
         const n = Number(e.key);
+        const node = this.dialogueTree[this.nodeId];
         if (n >= 1 && n <= this.choiceHandlers.length) this.choiceHandlers[n - 1]();
+        else if ((e.code === 'Enter' || e.code === 'NumpadEnter') && node && !node.choices.length) this.choiceHandlers[0]?.();
       }
       if (this.modal === 'journal' && e.code === 'KeyJ') { e.preventDefault(); input.consumeKey('KeyJ'); this.closeJournal(); }
     });
-    const flush = () => { if (!this.resetting) this.persist(); };
+    // only once the game is running: leaving from the loading screen must not overwrite the save
+    const flush = () => { if (!this.resetting && this.started) this.persist(); };
     window.addEventListener('pagehide', flush);
     document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
   }
@@ -1037,9 +1821,40 @@ export class Adventure {
       wheels: [...this.wheels],
       doorOpen: !this.doorBox,
       coinsLeft: this.coins.filter((c) => !c.taken).length,
-      killa: { x: this.killaPos.x, z: this.killaPos.z, enabled: this.killa.root.isEnabled() },
+      killa: { x: this.killaPos.x, z: this.killaPos.z, enabled: this.killa.root.isEnabled(), heading: this.killaHeading },
       interaction: this.interaction?.text ?? null,
+      meeting: this.meeting,
+      node: this.nodeId,
+      voice: this.voice.status,
+      voiceName: this.voice.voiceName,
+      subtitles: this.subtitlesVisible,
+      prefs: { ...this.prefs },
+      camMode: this.camMode,
+      nav: { shown: !$('nav').hidden, bearing: this.nav.bearing, arrowDeg: this.nav.arrowDeg, distance: this.nav.distance, label: $('nav-label').textContent },
+      beacon: this.beacon.isEnabled(),
     };
+  }
+
+  /** test hook: complete the opening (meeting + transformation) immediately. */
+  completeOpening() {
+    if (this.cine >= 0) this.skipTransformation();
+    this.cine = -1;
+    this.cineEls.title.hidden = true;
+    this.cineEls.skip.hidden = true;
+    this.voice.stop();
+    $('dialogue').hidden = true;
+    this.meeting = 'none';
+    this.dialogueTree = REPEAT_DIALOGUE;
+    this.save.flags.transformed = true;
+    this.applyEra(1);
+    this.finishIntro();
+    this.relocateToGuardhouse = false;
+    this.placeKilla(this.d.player.pos.x, this.d.player.pos.z);
+    this.d.camera.pose = null;
+    this.camMode = 'none';
+    this.shadowFocus = null;
+    this.setModal('none');
+    this.persist();
   }
 
   /** test hook: wheel display check (which glyph is at the top marker) */
@@ -1047,6 +1862,11 @@ export class Adventure {
     return this.wheelNodes[i].rotation.y;
   }
 }
+
+const WARM_SUN = new Color3(1.0, 0.84, 0.62);
+const WARM_SKY = new Color3(0.88, 0.84, 0.9);
+const WARM_FOG = new Color3(0.8, 0.76, 0.72);
+const newPoseTmp = newPose();
 
 // Wheel orientation constants (verified visually: glyph index w sits under the gold marker).
 const WHEEL_SPIN_SIGN = -1;

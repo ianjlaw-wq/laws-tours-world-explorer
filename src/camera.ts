@@ -4,6 +4,23 @@ import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { CollisionWorld } from './world/colliders';
 
 // Smooth third-person follow camera with user-adjustable angle and zoom.
+// Cinematics and conversations can take over by setting `pose` (orbit target + angles + distance).
+
+export interface CamPose { target: Vector3; alpha: number; beta: number; radius: number }
+
+const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/** Interpolate two poses (shortest way round for alpha) into `out`. */
+export function lerpPose(a: CamPose, b: CamPose, t: number, out: CamPose): CamPose {
+  Vector3.LerpToRef(a.target, b.target, t, out.target);
+  out.alpha = a.alpha + wrap(b.alpha - a.alpha) * t;
+  out.beta = a.beta + (b.beta - a.beta) * t;
+  // interpolate distance logarithmically so long swoops feel even
+  out.radius = Math.exp(Math.log(a.radius) + (Math.log(b.radius) - Math.log(a.radius)) * t);
+  return out;
+}
+
+export const newPose = (): CamPose => ({ target: new Vector3(), alpha: 0, beta: 1.3, radius: 6 });
 
 const MIN_R = 2.6;
 const MAX_R = 14;
@@ -16,6 +33,8 @@ export class FollowCamera {
   private target = new Vector3();
   private goal = new Vector3();
   private initialised = false;
+  /** When set, the camera holds this pose and ignores the explorer and look input. */
+  pose: CamPose | null = null;
 
   constructor(scene: Scene, private world: CollisionWorld) {
     this.cam = new ArcRotateCamera('cam', -Math.PI / 2, 1.25, 6.5, Vector3.Zero(), scene);
@@ -51,8 +70,35 @@ export class FollowCamera {
     this.initialised = false;
   }
 
+  /** Current camera pose (copied into `out`). */
+  getPose(out: CamPose): CamPose {
+    out.target.copyFrom(this.cam.target);
+    out.alpha = this.cam.alpha;
+    out.beta = this.cam.beta;
+    out.radius = this.cam.radius;
+    return out;
+  }
+
+  /** The pose the follow camera would settle at behind the explorer. */
+  followPose(focus: Vector3, heading: number, out: CamPose): CamPose {
+    out.target.set(focus.x, focus.y + 1.55, focus.z);
+    out.alpha = Math.atan2(-Math.cos(heading), -Math.sin(heading));
+    out.beta = 1.3;
+    out.radius = this.desiredRadius;
+    return out;
+  }
+
   update(dt: number, focus: Vector3, look: { dx: number; dy: number; zoom: number }, autoFollow: boolean, heading: number, moving: boolean) {
     const c = this.cam;
+    if (this.pose) {
+      c.target.copyFrom(this.pose.target);
+      c.alpha = this.pose.alpha;
+      c.beta = this.pose.beta;
+      c.radius = this.pose.radius;
+      this.target.copyFrom(this.pose.target);
+      this.initialised = true;
+      return;
+    }
     c.alpha -= look.dx * 0.0065;
     c.beta = Math.min(MAX_BETA, Math.max(MIN_BETA, c.beta - look.dy * 0.005));
     this.desiredRadius = Math.min(MAX_R, Math.max(MIN_R, this.desiredRadius + look.zoom));
