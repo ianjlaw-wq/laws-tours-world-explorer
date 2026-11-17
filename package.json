@@ -1,0 +1,23 @@
+{
+  "name": "laws-tours-world-explorer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Laws Tours — World Explorer: browser-based 3D exploration adventure (Machu Picchu)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@babylonjs/core": "8.56.2",
+    "@babylonjs/materials": "8.56.2"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.1",
+    "typescript": "5.9.3",
+    "vite": "6.4.6"
+  }
+}
